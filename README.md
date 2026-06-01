@@ -42,7 +42,7 @@ python download_datasets.py    # downloads IHDP and RHC benchmark datasets
 ## Quick Start
 
 ```python
-from meta import ADAPEL
+from adapel import ADAPEL
 import numpy as np
 
 # X: covariates, T: binary treatment, Y: observed outcome
@@ -129,7 +129,7 @@ ADAPEL on the Right Heart Catheterization dataset estimates a causal ATE of **+5
 
 ```
 Meta/
-├── meta.py              # ADAPEL implementation
+├── adapel.py            # ADAPEL implementation
 ├── train.py             # Benchmark on IHDP and RHC
 ├── download_datasets.py # Download IHDP and RHC datasets
 ├── data/                # Datasets (csv)

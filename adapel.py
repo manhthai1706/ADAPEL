@@ -1,5 +1,5 @@
 """
-meta.py — ADAPEL: ADaptive Doubly-robust Pseudo-outcome Ensemble Learner.
+adapel.py — ADAPEL: ADaptive Doubly-robust Pseudo-outcome Ensemble Learner.
 
 A meta-learning framework for Conditional Average Treatment Effect (CATE)
 estimation in observational studies. Combines DR-Learner, X-Learner and

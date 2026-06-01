@@ -10,7 +10,7 @@ if sys.platform == "win32":
     try: sys.stdout.reconfigure(encoding="utf-8")
     except: pass
 
-from meta import ADAPEL
+from adapel import ADAPEL
 
 
 # ── Benchmarks don le de so sanh ─────────────────────────────────────────────
