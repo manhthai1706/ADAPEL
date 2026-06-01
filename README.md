@@ -1,6 +1,6 @@
 # ADAPEL: Adaptive Doubly-Robust Pseudo-outcome Ensemble Learner
 
-A meta-learning framework for **Conditional Average Treatment Effect (CATE)** estimation from observational data. ADAPEL adaptively fuses three complementary meta-learners (DR-Learner, X-Learner, R-Learner) into a single propensity-driven ensemble, with a focus on doubly-robust inference and clinical-grade uncertainty quantification.
+A meta-learning model for **Conditional Average Treatment Effect (CATE)** estimation from observational data. ADAPEL adaptively fuses three complementary meta-learners (DR-Learner, X-Learner, R-Learner) into a single propensity-driven ensemble, with a focus on doubly-robust inference and clinical-grade uncertainty quantification.
 
 ## Key Innovation
 
