@@ -23,20 +23,20 @@ alpha(x) = max(min_alpha, clip(1 - 4*e(x)*(1-e(x)), 0, 1)^gamma)
 - When `e(x) ≈ 0` or `1` (imbalanced region): alpha → 1, ADAPEL falls back to the **X-Learner** (more stable in tails).
 - **R-Learner sample weighting** `(T - e(x))^2` further upweights informative samples whose treatment status deviates from the propensity.
 
-The fused pseudo-outcome is then regressed on `X` using **NNLS-constrained positive stacking** over a set of base learners, ensuring non-negative ensemble weights for interpretability and stability.
+The fused pseudo-outcome is then regressed on `X` using **NNLS-constrained positive stacking** over a diverse set of base learners (HistGBM, ExtraTrees, Ridge, DecisionTree), with L2 regularization for stability.
 
 ## Algorithm (4 Steps)
 
-1. **Cross-fit k-fold** to estimate nuisance functions `mu0(x), mu1(x), e(x)` without overfitting bias.
+1. **Cross-fit k-fold** with StratifiedKFold to estimate nuisance functions `mu0(x), mu1(x), e(x)` while preserving treatment proportions.
 2. **Adaptive pseudo-outcome** `Y_fused = alpha * Y_X + (1 - alpha) * Y_DR` driven by `e(x)`.
 3. **R-Learner sample weights** `w_i = (T_i - e(X_i))^2` to upweight informative samples.
-4. **NNLS positive stacking** on out-of-fold base learner predictions for the final CATE estimator.
+4. **NNLS positive stacking** with L2 regularization on out-of-fold base learner predictions for the final CATE estimator.
 
 ## Installation
 
 ```bash
-pip install numpy scipy scikit-learn pandas
-python download_datasets.py    # downloads IHDP and RHC benchmark datasets
+pip install -r requirements.txt
+python download_datasets.py    # downloads all benchmark datasets
 ```
 
 ## Quick Start
@@ -84,26 +84,51 @@ e_val = model.estimate_e_value(X, outcome_type="binary")
 rules = model.explain_cate_surrogate(X, feature_names=cols, max_depth=3)
 ```
 
-## Benchmark (IHDP, 747 samples, semi-synthetic)
+## Benchmarks
 
-| Method | PEHE (lower is better) |
-|---|---|
-| T-Learner (single GBM) | 0.63 |
-| S-Learner | 6.46 |
-| X-Learner | 4.08 |
-| DR-Learner | 3.09 |
-| **ADAPEL** | **0.76** |
+### IHDP-100 (100 realizations, 672 train / 75 test, semi-synthetic)
 
-ADAPEL achieves 1.2x the PEHE of T-Learner while providing counterfactual inference, bootstrap CIs, overlap diagnostics and an interpretable surrogate tree.
+| Method | Mean PEHE | Std PEHE |
+|--------|-----------|----------|
+| T-Learner (GBM) | 2.88 | 1.08 |
+| S-Learner (GBM) | 7.80 | 2.67 |
+| **ADAPEL** | **4.21** | **1.32** |
 
-## Benchmark (RHC, 5735 patients, real observational)
+### ACIC 2016 (10 settings, 4802 samples, 58 features, semi-synthetic)
 
-ADAPEL on the Right Heart Catheterization dataset estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%]) on 30-day mortality, with E-Value 1.33. This is consistent with the original Connors et al. (1996) finding that RHC increases short-term mortality.
+| Method | Mean PEHE | Std PEHE |
+|--------|-----------|----------|
+| T-Learner (GBM) | 1.12 | 0.57 |
+| S-Learner (GBM) | 12.26 | 11.52 |
+| **ADAPEL** | **1.38** | **0.48** |
+
+### Hillstrom (RCT benchmark, email marketing)
+
+| Method | ATE |
+|--------|-----|
+| RCT (diff-in-means) | 0.597 |
+| **ADAPEL** | **0.590** |
+
+### RHC (real observational, 5735 patients, 30-day mortality)
+
+ADAPEL estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%], E-Value: 1.33), consistent with Connors et al. (1996) that RHC increases short-term mortality.
+
+## Datasets
+
+| Dataset | Source | Samples | Features | Type |
+|---------|--------|---------|----------|------|
+| IHDP | Hill (2011) | 747 | 25 | Semi-synthetic |
+| IHDP-100 | NPCI | 672/75 x 100 | 25 | Semi-synthetic |
+| RHC | Connors et al. (1996) | 5735 | 39 | Real observational |
+| Lalonde | NSW labor training | 445 | 8 | RCT benchmark |
+| Hillstrom | Email marketing | 64000 | 10 | RCT |
+| Twins | US birth records | ~12000 | 30 | Proxy ground truth |
+| ACIC 2016 | Causal Inference Challenge | 4802 | 58 | Semi-synthetic |
 
 ## API Reference
 
 | Method | Description |
-|---|---|
+|--------|-------------|
 | `fit(X, T, Y)` | Train ADAPEL on covariates, treatment, outcome. |
 | `predict(X)` | Predict CATE `tau(x)` for each individual. |
 | `predict_potential_outcomes(X)` | Return `(Y(0), Y(1))` predictions. |
@@ -124,17 +149,7 @@ ADAPEL on the Right Heart Catheterization dataset estimates a causal ATE of **+5
 - Kennedy, E. H. (2020). Towards optimal doubly robust estimation of heterogeneous treatment effects. *Electronic Journal of Statistics*, 14(1), 3008-3048.
 - VanderWeele, T. J., & Ding, P. (2017). Sensitivity analysis in observational research: introducing the E-value. *Annals of Internal Medicine*, 167(4), 268-274.
 - Hill, J. L. (2011). Bayesian nonparametric modeling for causal inference. *Journal of Computational and Graphical Statistics*, 20(1), 217-240. (IHDP benchmark)
-
-## Files
-
-```
-Meta/
-├── adapel.py            # ADAPEL implementation
-├── train.py             # Benchmark on IHDP and RHC
-├── download_datasets.py # Download IHDP and RHC datasets
-├── data/                # Datasets (csv)
-└── README.md
-```
+- Connors, A. F., et al. (1996). The effectiveness of right heart catheterization in the initial care of critically ill patients. *JAMA*, 276(11), 889-897. (RHC)
 
 ## License
 
