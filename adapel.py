@@ -33,8 +33,10 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-from sklearn.model_selection import KFold
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import StratifiedKFold
 from sklearn.tree import DecisionTreeRegressor
+from joblib import Parallel, delayed
 
 warnings.filterwarnings("ignore")
 
@@ -130,6 +132,8 @@ class ADAPEL(BaseMetaLearner):
         self.base_estimators = base_estimators or [
             HistGradientBoostingRegressor(random_state=42, max_iter=200, max_depth=5, learning_rate=0.05),
             ExtraTreesRegressor(n_estimators=200, min_samples_leaf=5, max_features=0.7, n_jobs=-1, random_state=42),
+            Ridge(alpha=1.0),
+            DecisionTreeRegressor(max_depth=5, min_samples_leaf=10, random_state=42),
         ]
         self.n_folds         = n_folds
         self.fusion_gamma    = fusion_gamma
@@ -158,7 +162,14 @@ class ADAPEL(BaseMetaLearner):
         nb = oof.shape[1]
         sw_n = sw / max(sw.mean(), 1e-10)
         sqrt_w = np.sqrt(np.maximum(sw_n, 1e-10))
-        coefs, _ = nnls(np.column_stack([oof * sqrt_w[:, None], sqrt_w]), pseudo * sqrt_w, maxiter=500 * nb)
+        A = np.column_stack([oof * sqrt_w[:, None], sqrt_w])
+        b = pseudo * sqrt_w
+        # L2 regularization (ridge) qua data augmentation — only penalize base weights, not intercept
+        lam = 1e-3 * b.std() / nb
+        A_reg = np.column_stack([np.eye(nb) * np.sqrt(lam), np.zeros(nb)])
+        A = np.vstack([A, A_reg])
+        b = np.concatenate([b, np.zeros(nb)])
+        coefs, _ = nnls(A, b, maxiter=500 * nb)
         base_w, intercept = coefs[:nb], coefs[nb]
         if base_w.sum() < 1e-6:
             base_w = np.ones(nb) / nb
@@ -184,7 +195,10 @@ class ADAPEL(BaseMetaLearner):
         n, nb = X.shape[0], len(self.base_estimators)
         pDR, pX, ehat, tres = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
 
-        for tr, val in KFold(self.n_folds, shuffle=True, random_state=42).split(X):
+        # Adaptive folds: nhiều folds khi đủ data
+        n_folds = max(3, min(self.n_folds, int(n / 100)))
+        skf = StratifiedKFold(n_folds, shuffle=True, random_state=42)
+        for tr, val in skf.split(X, T):
             Xtr, Xv, Ttr, Tv, Ytr, Yv = X[tr], X[val], T[tr], T[val], Y[tr], Y[val]
             i0, i1 = Ttr == 0, Ttr == 1
             m0 = clone(self.outcome_estimator); m1 = clone(self.outcome_estimator)
@@ -205,7 +219,7 @@ class ADAPEL(BaseMetaLearner):
 
         oof = np.zeros((n, nb))
         for j, est in enumerate(self.base_estimators):
-            for tr2, val2 in KFold(self.n_folds, shuffle=True, random_state=0).split(X):
+            for tr2, val2 in skf.split(X, T):
                 oof[val2, j] = self._fit_w(clone(est), X[tr2], pseudo[tr2], sw[tr2]).predict(X[val2])
 
         self._meta          = self._fit_positive_stacking(oof, pseudo, sw)
@@ -255,7 +269,8 @@ class ADAPEL(BaseMetaLearner):
 
     # ── bootstrap CI ──
 
-    def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 10, random_state: int = 42) -> "ADAPEL":
+    def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 10, random_state: int = 42,
+                      n_jobs: int = -1) -> "ADAPEL":
         """Train trên toàn bộ data, sau đó train n_bootstrap bản nhẹ trên bootstrap samples.
 
         Mỗi bootstrap FIT LẠI TOÀN BỘ pipeline (gồm cả meta-learner) để CI coverage hợp lệ.
@@ -269,26 +284,32 @@ class ADAPEL(BaseMetaLearner):
         light_prop    = self._lighten(self.propensity_estimator)
         light_finals  = [self._lighten(m) for m in self.base_estimators]
 
-        self._bootstrap_learners = []
-        for _ in range(n_bootstrap):
-            idx = rng.choice(n, size=n, replace=True)
+        def _fit_one(seed):
+            rng_local = np.random.default_rng(seed)
+            idx = rng_local.choice(n, size=n, replace=True)
             Xb, Tb, Yb = X[idx], T[idx], Y[idx]
             if Tb.sum() < 5 or (1 - Tb).sum() < 5:
-                continue
+                return None
             bl = ADAPEL(
-                outcome_estimator=light_outcome,
-                propensity_estimator=light_prop,
-                base_estimators=light_finals,
-                n_folds=3,
+                outcome_estimator=clone(light_outcome),
+                propensity_estimator=clone(light_prop),
+                base_estimators=[clone(m) for m in light_finals],
+                n_folds=self.n_folds,
                 fusion_gamma=self.fusion_gamma,
                 min_alpha=self.min_alpha,
                 clip_propensity=self.clip_propensity,
             )
             try:
                 bl.fit(Xb, Tb, Yb)
-                self._bootstrap_learners.append(bl)
+                return bl
             except Exception:
-                continue
+                return None
+
+        seeds = [random_state + i + 1 for i in range(n_bootstrap)]
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_fit_one)(s) for s in seeds
+        )
+        self._bootstrap_learners = [r for r in results if r is not None]
         return self
 
     @staticmethod
