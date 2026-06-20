@@ -257,9 +257,9 @@ class ADAPEL(BaseMetaLearner):
 
     # ── bootstrap CI (subsampling) ──
 
-    def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 10, random_state: int = 42,
+    def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 30, random_state: int = 42,
                       n_jobs: int = -1) -> "ADAPEL":
-        """Subsampling bootstrap (63.2% không hoàn lại, mỗi lần)."""
+        """Bootstrap CI: fit n_bootstrap models trên bootstrap samples (có hoàn lại)."""
         X, T, Y = self._validate(X, T, Y)
         n = X.shape[0]
         self.fit(X, T, Y)
@@ -270,8 +270,7 @@ class ADAPEL(BaseMetaLearner):
 
         def _fit_one(seed):
             rng = np.random.default_rng(seed)
-            m = int(n * 0.632)
-            idx = rng.choice(n, size=m, replace=False)
+            idx = rng.choice(n, size=n, replace=True)
             Xb, Tb, Yb = X[idx], T[idx], Y[idx]
             if Tb.sum() < 5 or (1 - Tb).sum() < 5:
                 return None
@@ -297,7 +296,7 @@ class ADAPEL(BaseMetaLearner):
         el = clone(est)
         for attr in ("max_iter", "n_estimators"):
             if hasattr(el, attr) and getattr(el, attr) is not None:
-                setattr(el, attr, min(getattr(el, attr), 80))
+                setattr(el, attr, max(50, int(getattr(el, attr) * 0.7)))
         if hasattr(el, "n_jobs"):
             el.n_jobs = -1
         return el
@@ -315,9 +314,11 @@ class ADAPEL(BaseMetaLearner):
         if self._bootstrap_learners:
             preds = np.column_stack([m.predict(X) for m in self._bootstrap_learners])
             cate = preds.mean(axis=1)
-            lower = np.percentile(preds, 100 * alpha / 2, axis=1)
-            upper = np.percentile(preds, 100 * (1 - alpha / 2), axis=1)
-            std = preds.std(axis=1)
+            std = preds.std(axis=1, ddof=1)
+            from scipy.stats import norm as _norm
+            zval = float(_norm.ppf(1 - alpha / 2))
+            lower = cate - zval * std
+            upper = cate + zval * std
         return {"cate": cate, "lower_ci": lower, "upper_ci": upper,
                 "bootstrap_std": std, "propensity": e,
                 "propensity_raw": e_raw, "in_overlap": in_overlap}
