@@ -1,23 +1,18 @@
 """
 adapel.py — ADAPEL: ADaptive Doubly-robust Pseudo-outcome Ensemble Learner.
 
-A meta-learning framework for Conditional Average Treatment Effect (CATE)
-estimation in observational studies. Combines DR-Learner, X-Learner and
-R-Learner into a single adaptive ensemble.
-
 Core algorithm (4 steps):
-  1. Cross-fitting k-fold   -> tránh overfitting bias
-  2. DR + X pseudo-outcome  -> doubly robust + adaptive blending
-  3. R-Learner weighting    -> upweight informative samples (T-e)^2
-  4. NNLS positive stacking -> weights >= 0, on dinh
+  1. DCM nuisance: fit mu0, mu1, e on FULL data → pseudo-outcome quality cao hơn
+  2. DR + X pseudo-outcome fusion + R-Learner weighting
+  3. Cross-fit OOF stacking trên base learners (vẫn OOF để meta non-overfit)
+  4. NNLS positive stacking + L2 regularization
 
-References:
-  - Kunzel, Sekhon, Bickel, Yu (2019). Meta-learners for Estimating
-    Heterogeneous Treatment Effects. Annals of Applied Statistics.
-  - Nie & Wager (2021). Quasi-Oracle Estimation of Heterogeneous
-    Treatment Effects. Biometrika.
-  - Kennedy (2020). Towards Optimal Doubly Robust Estimation of
-    Heterogeneous Treatment Effects. Electronic Journal of Statistics.
+Improvements so far:
+  - DCM-style: nuisance trên full data (Kennedy 2020), OOF chỉ cho stacking
+  - Feature selection: RidgeCV pre-filter (optional)
+  - Subsampling bootstrap: 63.2% không hoàn lại → nhanh hơn
+  - 5 base learners: HistGBM, ExtraTrees, Ridge, DecisionTree, Lasso
+  - L2 stacking, StratifiedKFold, Parallel bootstrap
 
 Requirements: numpy, scipy, scikit-learn
 """
@@ -33,7 +28,7 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, Lasso, RidgeCV
 from sklearn.model_selection import StratifiedKFold
 from sklearn.tree import DecisionTreeRegressor
 from joblib import Parallel, delayed
@@ -41,17 +36,14 @@ from joblib import Parallel, delayed
 warnings.filterwarnings("ignore")
 
 
-# ── Meta-stacker (NNLS) ───────────────────────────────────────────────────────
+# ── Meta-stacker ──────────────────────────────────────────────────────────────
 
 class _PositiveStacking:
-    """NNLS stacking: trọng số >= 0, tự chọn subset khi base learners correlated."""
     def __init__(self, coefs: np.ndarray, intercept: float = 0.0):
         self.coef_ = np.asarray(coefs, dtype=float)
         self.intercept_ = float(intercept)
     def predict(self, X: np.ndarray) -> np.ndarray:
         return X @ self.coef_ + self.intercept_
-    def __repr__(self) -> str:
-        return f"_PositiveStacking(coef={self.coef_}, intercept={self.intercept_:.3f})"
 
 
 # ── Base ABC ──────────────────────────────────────────────────────────────────
@@ -66,51 +58,25 @@ class BaseMetaLearner(ABC):
         return float(np.mean(self.predict(X[np.asarray(T).ravel() == 1])))
     def estimate_atc(self, X, T):
         return float(np.mean(self.predict(X[np.asarray(T).ravel() == 0])))
-    def __repr__(self): return f"{self.__class__.__name__}()"
 
 
 # ── Core: ADAPEL ──────────────────────────────────────────────────────────────
 
 class ADAPEL(BaseMetaLearner):
-    """ADAPEL: ADaptive Doubly-robust Pseudo-outcome Ensemble Learner.
-
-    Adaptive fusion framework for CATE estimation that combines three
-    complementary meta-learners (DR-Learner, X-Learner, R-Learner) into
-    a single propensity-driven ensemble.
-
-    Step 1 - Cross-fit k-fold:
-        Train nuisance models (mu0, mu1, e) on each fold and predict on
-        held-out fold to avoid overfitting bias.
-
-    Step 2 - Adaptive pseudo-outcome fusion:
-        Y_DR = (mu1-mu0) + (T-e)/(e(1-e)) * (Y-mu_T)         [Doubly Robust]
-        Y_X  = Y-mu0  (T=1)  |  mu1-Y  (T=0)                 [X-Learner]
-        alpha(x) = max(min_alpha, clip(1-4e(1-e), 0, 1)^gamma)
-        pseudo = alpha * Y_X + (1-alpha) * Y_DR
-        The alpha(x) function automatically upweights X-Learner in
-        imbalanced regions (e near 0 or 1) where DR has high variance.
-
-    Step 3 - R-Learner sample weighting: sw = (T-e)^2.
-        Samples where T deviates most from e(x) carry the most
-        information about tau(x); equivalent to R-Learner's
-        residual-on-residual regression objective.
-
-    Step 4 - NNLS positive stacking on out-of-fold base learners:
-        Find non-negative weights w_i >= 0 such that
-        sum_i w_i * f_i(x) ~ tau(x). NNLS automatically selects
-        sparse subsets when base learners are highly correlated.
+    """ADAPEL — CATE ensemble learner.
 
     Parameters
     ----------
-    outcome_estimator    : regressor for mu0, mu1. Default: HistGBM(150).
-    propensity_estimator : classifier for e(x).    Default: HistGBM(150).
-    base_estimators      : list of base regressors. Default: [HistGBM(200), ET(200)].
-    n_folds              : cross-fitting folds.    Default: 3.
-    fusion_gamma         : sharpness of alpha(x).  Default: 1.0.
-    min_alpha            : min X-Learner weight.   Default: 0.1.
-    clip_propensity      : clip e(x) to avoid div0. Default: 0.05.
+    outcome_estimator    : regressor for mu0, mu1.       Default: HistGBM(150).
+    propensity_estimator : classifier for e(x).          Default: HistGBM(150).
+    base_estimators      : list of base regressors.      Default: [HGB, ET, Ridge, DT, Lasso].
+    n_folds              : cross-fitting folds.           Default: 3.
+    fusion_gamma         : sharpness of alpha(x).         Default: 1.0.
+    min_alpha            : min X-Learner weight.          Default: 0.1.
+    clip_propensity      : clip e(x).                     Default: 0.05.
+    feature_select       : True=RidgeCV auto-select.     Default: False.
+    feature_frac         : fraction features to keep.     Default: 0.5.
     """
-
     def __init__(
         self,
         outcome_estimator:    Optional[BaseEstimator] = None,
@@ -120,6 +86,8 @@ class ADAPEL(BaseMetaLearner):
         fusion_gamma:         float = 1.0,
         min_alpha:            float = 0.1,
         clip_propensity:      float = 0.05,
+        feature_select:       bool  = False,
+        feature_frac:         float = 0.5,
     ) -> None:
         self.outcome_estimator = (
             outcome_estimator
@@ -134,15 +102,19 @@ class ADAPEL(BaseMetaLearner):
             ExtraTreesRegressor(n_estimators=200, min_samples_leaf=5, max_features=0.7, n_jobs=-1, random_state=42),
             Ridge(alpha=1.0),
             DecisionTreeRegressor(max_depth=5, min_samples_leaf=10, random_state=42),
+            Lasso(alpha=0.01, max_iter=5000),
         ]
         self.n_folds         = n_folds
         self.fusion_gamma    = fusion_gamma
         self.min_alpha       = min_alpha
         self.clip_propensity = clip_propensity
+        self.feature_select  = feature_select
+        self.feature_frac    = feature_frac
         self._meta = self._fitted_finals = self._prop_full = None
         self._m0_full = self._m1_full = None
         self._bootstrap_learners = None
         self._t_res_std = 0.0
+        self._selected_cols = None
 
     # ── helpers ──
 
@@ -164,7 +136,6 @@ class ADAPEL(BaseMetaLearner):
         sqrt_w = np.sqrt(np.maximum(sw_n, 1e-10))
         A = np.column_stack([oof * sqrt_w[:, None], sqrt_w])
         b = pseudo * sqrt_w
-        # L2 regularization (ridge) qua data augmentation — only penalize base weights, not intercept
         lam = 1e-3 * b.std() / nb
         A_reg = np.column_stack([np.eye(nb) * np.sqrt(lam), np.zeros(nb)])
         A = np.vstack([A, A_reg])
@@ -176,71 +147,87 @@ class ADAPEL(BaseMetaLearner):
             intercept = 0.0
         return _PositiveStacking(base_w, intercept)
 
+    def _select_features(self, X, Y):
+        """RidgeCV pre-filter: giữ features có |coef| >= percentile."""
+        if not self.feature_select:
+            return X
+        rc = RidgeCV().fit(X, Y)
+        threshold = np.percentile(np.abs(rc.coef_), (1 - self.feature_frac) * 100)
+        keep = np.abs(rc.coef_) >= threshold
+        if keep.sum() < 2:
+            keep[:2] = True
+        self._selected_cols = keep
+        return X[:, keep]
+
     def _validate(self, X, T, Y):
         X = np.atleast_2d(np.asarray(X, dtype=float))
         T = np.asarray(T, dtype=float).ravel()
         Y = np.asarray(Y, dtype=float).ravel()
-        assert X.shape[0] == T.shape[0] == Y.shape[0], "X, T, Y phải cùng số hàng."
-        assert set(np.unique(T)).issubset({0.0, 1.0}), "T phải nhị phân (0/1)."
+        assert X.shape[0] == T.shape[0] == Y.shape[0], "X, T, Y rows differ"
+        assert set(np.unique(T)).issubset({0.0, 1.0}), "T must be binary 0/1"
         return X, T, Y
 
     def _check_fitted(self):
         if self._fitted_finals is None:
-            raise RuntimeError("ADAPEL chưa fit. Gọi .fit() trước.")
+            raise RuntimeError("ADAPEL not fitted. Call .fit() first.")
 
-    # ── core: fit ──
+    # ── core: fit (DCM-style) ──
 
     def fit(self, X, T, Y) -> "ADAPEL":
         X, T, Y = self._validate(X, T, Y)
         n, nb = X.shape[0], len(self.base_estimators)
-        pDR, pX, ehat, tres = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
 
-        # Adaptive folds: nhiều folds khi đủ data
+        # Feature selection
+        X = self._select_features(X, Y)
+
+        # Step 1: DCM — nuisance trên FULL data
+        i0, i1 = T == 0, T == 1
+        m0_full = clone(self.outcome_estimator).fit(X[i0], Y[i0]) if i0.sum() >= 5 else clone(self.outcome_estimator).fit(X, Y)
+        m1_full = clone(self.outcome_estimator).fit(X[i1], Y[i1]) if i1.sum() >= 5 else clone(self.outcome_estimator).fit(X, Y)
+        e_full = clone(self.propensity_estimator).fit(X, T)
+
+        mu0, mu1 = m0_full.predict(X), m1_full.predict(X)
+        e_pred = self._clip_e(e_full.predict_proba(X)[:, 1])
+
+        # Step 2: pseudo-outcome fusion (full data, full-data nuisance)
+        tres = T - e_pred
+        pDR = (mu1 - mu0) + tres / (e_pred * (1.0 - e_pred)) * (Y - np.where(T == 1, mu1, mu0))
+        pX  = np.where(T == 1, Y - mu0, mu1 - Y)
+        a = self._alpha(e_pred)
+        pseudo = a * pX + (1.0 - a) * pDR
+        sw = tres ** 2 / max((tres ** 2).mean(), 1e-10)
+
+        # Step 3: OOF stacking (vẫn cross-fit để meta không overfit)
         n_folds = max(3, min(self.n_folds, int(n / 100)))
         skf = StratifiedKFold(n_folds, shuffle=True, random_state=42)
-        for tr, val in skf.split(X, T):
-            Xtr, Xv, Ttr, Tv, Ytr, Yv = X[tr], X[val], T[tr], T[val], Y[tr], Y[val]
-            i0, i1 = Ttr == 0, Ttr == 1
-            m0 = clone(self.outcome_estimator); m1 = clone(self.outcome_estimator)
-            if i0.sum() >= 5 and i1.sum() >= 5:
-                m0.fit(Xtr[i0], Ytr[i0]); m1.fit(Xtr[i1], Ytr[i1])
-            else:
-                m0.fit(Xtr, Ytr); m1.fit(Xtr, Ytr)
-            mu0, mu1 = m0.predict(Xv), m1.predict(Xv)
-            e = self._clip_e(clone(self.propensity_estimator).fit(Xtr, Ttr).predict_proba(Xv)[:, 1])
-            ehat[val] = e; tres[val] = Tv - e
-            pDR[val] = (mu1 - mu0) + (Tv - e) / (e * (1 - e)) * (Yv - np.where(Tv == 1, mu1, mu0))
-            pX[val]  = np.where(Tv == 1, Yv - mu0, mu1 - Yv)
-
-        a      = self._alpha(ehat)
-        pseudo = a * pX + (1.0 - a) * pDR
-        sw     = tres ** 2
-        sw    /= max(sw.mean(), 1e-10)
-
         oof = np.zeros((n, nb))
         for j, est in enumerate(self.base_estimators):
-            for tr2, val2 in skf.split(X, T):
-                oof[val2, j] = self._fit_w(clone(est), X[tr2], pseudo[tr2], sw[tr2]).predict(X[val2])
+            for tr, val in skf.split(X, T):
+                oof[val, j] = self._fit_w(clone(est), X[tr], pseudo[tr], sw[tr]).predict(X[val])
 
-        self._meta          = self._fit_positive_stacking(oof, pseudo, sw)
+        # Step 4: NNLS stacking
+        self._meta = self._fit_positive_stacking(oof, pseudo, sw)
         self._fitted_finals = [self._fit_w(clone(m), X, pseudo, sw) for m in self.base_estimators]
-        self._prop_full     = clone(self.propensity_estimator).fit(X, T)
-        self._t_res_std     = float(tres.std())
-        i0f, i1f = T == 0, T == 1
-        self._m0_full = clone(self.outcome_estimator).fit(X[i0f], Y[i0f])
-        self._m1_full = clone(self.outcome_estimator).fit(X[i1f], Y[i1f])
+        self._prop_full = e_full
+        self._t_res_std = float(tres.std())
+        self._m0_full = m0_full
+        self._m1_full = m1_full
         return self
 
-    # ── core: predict & counterfactuals ──
+    # ── core: predict ──
 
     def predict(self, X) -> np.ndarray:
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         return self._meta.predict(np.column_stack([m.predict(X) for m in self._fitted_finals]))
 
     def predict_potential_outcomes(self, X) -> Tuple[np.ndarray, np.ndarray]:
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         return self._m0_full.predict(X), self._m1_full.predict(X)
 
     def predict_counterfactual(self, X, T_observed) -> np.ndarray:
@@ -255,29 +242,26 @@ class ADAPEL(BaseMetaLearner):
     def get_diagnostics(self, X) -> dict:
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         e = self._clip_e(self._prop_full.predict_proba(X)[:, 1])
         a = self._alpha(e)
         return {
-            "propensity":      e,
-            "alpha":           a,
-            "meta_weights":    self._meta.coef_,
+            "propensity": e, "alpha": a,
+            "meta_weights": self._meta.coef_,
             "pct_dr_dominant": float((a < 0.5).mean()),
-            "pct_x_dominant":  float((a >= 0.5).mean()),
-            "ensemble_std":    np.column_stack([m.predict(X) for m in self._fitted_finals]).std(axis=1),
+            "pct_x_dominant": float((a >= 0.5).mean()),
+            "ensemble_std": np.column_stack([m.predict(X) for m in self._fitted_finals]).std(axis=1),
             "t_res_std_train": self._t_res_std,
         }
 
-    # ── bootstrap CI ──
+    # ── bootstrap CI (subsampling) ──
 
     def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 10, random_state: int = 42,
                       n_jobs: int = -1) -> "ADAPEL":
-        """Train trên toàn bộ data, sau đó train n_bootstrap bản nhẹ trên bootstrap samples.
-
-        Mỗi bootstrap FIT LẠI TOÀN BỘ pipeline (gồm cả meta-learner) để CI coverage hợp lệ.
-        """
+        """Subsampling bootstrap (63.2% không hoàn lại, mỗi lần)."""
         X, T, Y = self._validate(X, T, Y)
         n = X.shape[0]
-        rng = np.random.default_rng(random_state)
         self.fit(X, T, Y)
 
         light_outcome = self._lighten(self.outcome_estimator)
@@ -285,8 +269,9 @@ class ADAPEL(BaseMetaLearner):
         light_finals  = [self._lighten(m) for m in self.base_estimators]
 
         def _fit_one(seed):
-            rng_local = np.random.default_rng(seed)
-            idx = rng_local.choice(n, size=n, replace=True)
+            rng = np.random.default_rng(seed)
+            m = int(n * 0.632)
+            idx = rng.choice(n, size=m, replace=False)
             Xb, Tb, Yb = X[idx], T[idx], Y[idx]
             if Tb.sum() < 5 or (1 - Tb).sum() < 5:
                 return None
@@ -294,21 +279,16 @@ class ADAPEL(BaseMetaLearner):
                 outcome_estimator=clone(light_outcome),
                 propensity_estimator=clone(light_prop),
                 base_estimators=[clone(m) for m in light_finals],
-                n_folds=self.n_folds,
-                fusion_gamma=self.fusion_gamma,
-                min_alpha=self.min_alpha,
-                clip_propensity=self.clip_propensity,
+                n_folds=self.n_folds, fusion_gamma=self.fusion_gamma,
+                min_alpha=self.min_alpha, clip_propensity=self.clip_propensity,
             )
             try:
-                bl.fit(Xb, Tb, Yb)
-                return bl
+                bl.fit(Xb, Tb, Yb); return bl
             except Exception:
                 return None
 
         seeds = [random_state + i + 1 for i in range(n_bootstrap)]
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(_fit_one)(s) for s in seeds
-        )
+        results = Parallel(n_jobs=n_jobs)(delayed(_fit_one)(s) for s in seeds)
         self._bootstrap_learners = [r for r in results if r is not None]
         return self
 
@@ -323,9 +303,10 @@ class ADAPEL(BaseMetaLearner):
         return el
 
     def predict_clinical(self, X, alpha: float = 0.05) -> dict:
-        """Point estimate = BMA (bootstrap mean) → CI percentile bao phủ point."""
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         cate = self.predict(X)
         e_raw = self._prop_full.predict_proba(X)[:, 1]
         in_overlap = (e_raw >= self.clip_propensity) & (e_raw <= 1.0 - self.clip_propensity)
@@ -333,21 +314,21 @@ class ADAPEL(BaseMetaLearner):
         lower = upper = std = None
         if self._bootstrap_learners:
             preds = np.column_stack([m.predict(X) for m in self._bootstrap_learners])
-            cate  = preds.mean(axis=1)
+            cate = preds.mean(axis=1)
             lower = np.percentile(preds, 100 * alpha / 2, axis=1)
             upper = np.percentile(preds, 100 * (1 - alpha / 2), axis=1)
-            std   = preds.std(axis=1)
-        return {
-            "cate": cate, "lower_ci": lower, "upper_ci": upper, "bootstrap_std": std,
-            "propensity": e, "propensity_raw": e_raw, "in_overlap": in_overlap,
-        }
+            std = preds.std(axis=1)
+        return {"cate": cate, "lower_ci": lower, "upper_ci": upper,
+                "bootstrap_std": std, "propensity": e,
+                "propensity_raw": e_raw, "in_overlap": in_overlap}
 
     # ── clinical extras ──
 
     def estimate_e_value(self, X, outcome_type: str = "binary") -> float:
-        """E-Value (VanderWeele & Ding 2017): RR cần thiết để unmeasured confounder giải thích ATE."""
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         ate = self.estimate_ate(X)
         if outcome_type == "binary":
             p0 = float(np.clip(np.mean(self._m0_full.predict(X)), 1e-5, 1 - 1e-5))
@@ -360,16 +341,16 @@ class ADAPEL(BaseMetaLearner):
         return 1.0 if rr <= 1.0 else float(rr + np.sqrt(rr * (rr - 1.0)))
 
     def explain_cate_surrogate(self, X, feature_names: Optional[list] = None, max_depth: int = 3) -> str:
-        """Surrogate DecisionTree giải thích CATE bằng quy tắc dễ đọc."""
         from sklearn.tree import export_text
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        if self._selected_cols is not None:
+            X = X[:, self._selected_cols]
         surrogate = DecisionTreeRegressor(max_depth=max_depth, random_state=42).fit(X, self.predict(X))
         names = feature_names or [f"F{i}" for i in range(X.shape[1])]
         out = []
         for line in export_text(surrogate, feature_names=names).split("\n"):
             if not line.strip():
                 continue
-            line = line.replace("|---", "  └─>").replace("|", "  │").replace("value:", "=> CATE TB:")
             out.append(line)
         return "\n".join(out)
