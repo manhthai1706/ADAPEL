@@ -1,20 +1,13 @@
 """
-adapel.py — ADAPEL: ADaptive Doubly-robust Pseudo-outcome Ensemble Learner.
+adapel.py — ADAPEL: CATE ensemble learner.
 
-Core algorithm (4 steps):
-  1. DCM nuisance: fit mu0, mu1, e on FULL data → pseudo-outcome quality cao hơn
-  2. DR + X pseudo-outcome fusion + R-Learner weighting
-  3. Cross-fit OOF stacking trên base learners (vẫn OOF để meta non-overfit)
-  4. NNLS positive stacking + L2 regularization
+Algorithm:
+  1. DCM nuisance (fit mu0, mu1, e on full data)
+  2. Adaptive DR/X pseudo-outcome + R-Learner weights
+  3. OOF stacking (light models) → NNLS positive stacking + L2
+  4. Final refit (full models, skip zero-weight learners)
 
-Improvements so far:
-  - DCM-style: nuisance trên full data (Kennedy 2020), OOF chỉ cho stacking
-  - Feature selection: RidgeCV pre-filter (optional)
-  - Subsampling bootstrap: 63.2% không hoàn lại → nhanh hơn
-  - 5 base learners: HistGBM, ExtraTrees, Ridge, DecisionTree, Lasso
-  - L2 stacking, StratifiedKFold, Parallel bootstrap
-
-Requirements: numpy, scipy, scikit-learn
+Fast, CPU-friendly, single file. No GPU needed.
 """
 from __future__ import annotations
 import warnings
@@ -22,6 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 import numpy as np
 from scipy.optimize import nnls
+from scipy.stats import norm as _norm
 from sklearn.base import BaseEstimator, clone
 from sklearn.ensemble import (
     ExtraTreesRegressor,
@@ -36,8 +30,6 @@ from joblib import Parallel, delayed
 warnings.filterwarnings("ignore")
 
 
-# ── Meta-stacker ──────────────────────────────────────────────────────────────
-
 class _PositiveStacking:
     def __init__(self, coefs: np.ndarray, intercept: float = 0.0):
         self.coef_ = np.asarray(coefs, dtype=float)
@@ -45,8 +37,6 @@ class _PositiveStacking:
     def predict(self, X: np.ndarray) -> np.ndarray:
         return X @ self.coef_ + self.intercept_
 
-
-# ── Base ABC ──────────────────────────────────────────────────────────────────
 
 class BaseMetaLearner(ABC):
     @abstractmethod
@@ -60,23 +50,7 @@ class BaseMetaLearner(ABC):
         return float(np.mean(self.predict(X[np.asarray(T).ravel() == 0])))
 
 
-# ── Core: ADAPEL ──────────────────────────────────────────────────────────────
-
 class ADAPEL(BaseMetaLearner):
-    """ADAPEL — CATE ensemble learner.
-
-    Parameters
-    ----------
-    outcome_estimator    : regressor for mu0, mu1.       Default: HistGBM(150).
-    propensity_estimator : classifier for e(x).          Default: HistGBM(150).
-    base_estimators      : list of base regressors.      Default: [HGB, ET, Ridge, DT, Lasso].
-    n_folds              : cross-fitting folds.           Default: 3.
-    fusion_gamma         : sharpness of alpha(x).         Default: 1.0.
-    min_alpha            : min X-Learner weight.          Default: 0.1.
-    clip_propensity      : clip e(x).                     Default: 0.05.
-    feature_select       : True=RidgeCV auto-select.     Default: False.
-    feature_frac         : fraction features to keep.     Default: 0.5.
-    """
     def __init__(
         self,
         outcome_estimator:    Optional[BaseEstimator] = None,
@@ -148,10 +122,9 @@ class ADAPEL(BaseMetaLearner):
         return _PositiveStacking(base_w, intercept)
 
     def _select_features(self, X, Y):
-        """RidgeCV pre-filter: giữ features có |coef| >= percentile."""
         if not self.feature_select:
             return X
-        rc = RidgeCV().fit(X, Y)
+        rc = RidgeCV(cv=5).fit(X, Y)
         threshold = np.percentile(np.abs(rc.coef_), (1 - self.feature_frac) * 100)
         keep = np.abs(rc.coef_) >= threshold
         if keep.sum() < 2:
@@ -171,7 +144,27 @@ class ADAPEL(BaseMetaLearner):
         if self._fitted_finals is None:
             raise RuntimeError("ADAPEL not fitted. Call .fit() first.")
 
-    # ── core: fit (DCM-style) ──
+    def _lighter(self, est, factor=0.5):
+        """Clone estimator with reduced complexity for OOF stacking."""
+        el = clone(est)
+        for attr in ("max_iter", "n_estimators"):
+            if hasattr(el, attr) and getattr(el, attr) is not None:
+                setattr(el, attr, max(30, int(getattr(el, attr) * factor)))
+        if hasattr(el, "n_jobs"):
+            el.n_jobs = -1
+        return el
+
+    def _lighten(self, est):
+        """Clone estimator with 70% complexity for bootstrap."""
+        el = clone(est)
+        for attr in ("max_iter", "n_estimators"):
+            if hasattr(el, attr) and getattr(el, attr) is not None:
+                setattr(el, attr, max(50, int(getattr(el, attr) * 0.7)))
+        if hasattr(el, "n_jobs"):
+            el.n_jobs = -1
+        return el
+
+    # ── fit ──
 
     def fit(self, X, T, Y) -> "ADAPEL":
         X, T, Y = self._validate(X, T, Y)
@@ -180,16 +173,21 @@ class ADAPEL(BaseMetaLearner):
         # Feature selection
         X = self._select_features(X, Y)
 
-        # Step 1: DCM — nuisance trên FULL data
+        # DCM nuisance on full data
         i0, i1 = T == 0, T == 1
-        m0_full = clone(self.outcome_estimator).fit(X[i0], Y[i0]) if i0.sum() >= 5 else clone(self.outcome_estimator).fit(X, Y)
-        m1_full = clone(self.outcome_estimator).fit(X[i1], Y[i1]) if i1.sum() >= 5 else clone(self.outcome_estimator).fit(X, Y)
+        if i0.sum() >= 5:
+            m0_full = clone(self.outcome_estimator).fit(X[i0], Y[i0])
+        else:
+            m0_full = clone(self.outcome_estimator).fit(X, Y)
+        if i1.sum() >= 5:
+            m1_full = clone(self.outcome_estimator).fit(X[i1], Y[i1])
+        else:
+            m1_full = clone(self.outcome_estimator).fit(X, Y)
         e_full = clone(self.propensity_estimator).fit(X, T)
 
         mu0, mu1 = m0_full.predict(X), m1_full.predict(X)
         e_pred = self._clip_e(e_full.predict_proba(X)[:, 1])
 
-        # Step 2: pseudo-outcome fusion (full data, full-data nuisance)
         tres = T - e_pred
         pDR = (mu1 - mu0) + tres / (e_pred * (1.0 - e_pred)) * (Y - np.where(T == 1, mu1, mu0))
         pX  = np.where(T == 1, Y - mu0, mu1 - Y)
@@ -197,31 +195,46 @@ class ADAPEL(BaseMetaLearner):
         pseudo = a * pX + (1.0 - a) * pDR
         sw = tres ** 2 / max((tres ** 2).mean(), 1e-10)
 
-        # Step 3: OOF stacking (vẫn cross-fit để meta không overfit)
+        # OOF stacking with LIGHT models (50% complexity) for speed
         n_folds = max(3, min(self.n_folds, int(n / 100)))
         skf = StratifiedKFold(n_folds, shuffle=True, random_state=42)
         oof = np.zeros((n, nb))
         for j, est in enumerate(self.base_estimators):
+            light_est = self._lighter(est, 0.5)
             for tr, val in skf.split(X, T):
-                oof[val, j] = self._fit_w(clone(est), X[tr], pseudo[tr], sw[tr]).predict(X[val])
+                oof[val, j] = self._fit_w(clone(light_est), X[tr], pseudo[tr], sw[tr]).predict(X[val])
 
-        # Step 4: NNLS stacking
+        # NNLS stacking
         self._meta = self._fit_positive_stacking(oof, pseudo, sw)
-        self._fitted_finals = [self._fit_w(clone(m), X, pseudo, sw) for m in self.base_estimators]
+
+        # Final refit: skip learners with zero weight (speed optimization)
+        self._fitted_finals = []
+        for j, m in enumerate(self.base_estimators):
+            if j < len(self._meta.coef_) and self._meta.coef_[j] < 1e-8:
+                self._fitted_finals.append(None)
+            else:
+                self._fitted_finals.append(self._fit_w(clone(m), X, pseudo, sw))
+
         self._prop_full = e_full
         self._t_res_std = float(tres.std())
         self._m0_full = m0_full
         self._m1_full = m1_full
         return self
 
-    # ── core: predict ──
+    # ── predict ──
 
     def predict(self, X) -> np.ndarray:
         self._check_fitted()
         X = np.atleast_2d(np.asarray(X, dtype=float))
         if self._selected_cols is not None:
             X = X[:, self._selected_cols]
-        return self._meta.predict(np.column_stack([m.predict(X) for m in self._fitted_finals]))
+        preds = []
+        for m in self._fitted_finals:
+            if m is not None:
+                preds.append(m.predict(X))
+            else:
+                preds.append(np.zeros(X.shape[0]))
+        return self._meta.predict(np.column_stack(preds))
 
     def predict_potential_outcomes(self, X) -> Tuple[np.ndarray, np.ndarray]:
         self._check_fitted()
@@ -251,22 +264,23 @@ class ADAPEL(BaseMetaLearner):
             "meta_weights": self._meta.coef_,
             "pct_dr_dominant": float((a < 0.5).mean()),
             "pct_x_dominant": float((a >= 0.5).mean()),
-            "ensemble_std": np.column_stack([m.predict(X) for m in self._fitted_finals]).std(axis=1),
+            "ensemble_std": np.column_stack([
+                m.predict(X) if m is not None else np.zeros(X.shape[0])
+                for m in self._fitted_finals
+            ]).std(axis=1),
             "t_res_std_train": self._t_res_std,
         }
 
-    # ── bootstrap CI (subsampling) ──
+    # ── bootstrap CI ──
 
     def fit_bootstrap(self, X, T, Y, n_bootstrap: int = 30, random_state: int = 42,
                       n_jobs: int = -1) -> "ADAPEL":
-        """Bootstrap CI: fit n_bootstrap models trên bootstrap samples (có hoàn lại)."""
         X, T, Y = self._validate(X, T, Y)
         n = X.shape[0]
         self.fit(X, T, Y)
 
         light_outcome = self._lighten(self.outcome_estimator)
-        light_prop    = self._lighten(self.propensity_estimator)
-        light_finals  = [self._lighten(m) for m in self.base_estimators]
+        light_prop = self._lighten(self.propensity_estimator)
 
         def _fit_one(seed):
             rng = np.random.default_rng(seed)
@@ -277,7 +291,6 @@ class ADAPEL(BaseMetaLearner):
             bl = ADAPEL(
                 outcome_estimator=clone(light_outcome),
                 propensity_estimator=clone(light_prop),
-                base_estimators=[clone(m) for m in light_finals],
                 n_folds=self.n_folds, fusion_gamma=self.fusion_gamma,
                 min_alpha=self.min_alpha, clip_propensity=self.clip_propensity,
             )
@@ -290,16 +303,6 @@ class ADAPEL(BaseMetaLearner):
         results = Parallel(n_jobs=n_jobs)(delayed(_fit_one)(s) for s in seeds)
         self._bootstrap_learners = [r for r in results if r is not None]
         return self
-
-    @staticmethod
-    def _lighten(est) -> BaseEstimator:
-        el = clone(est)
-        for attr in ("max_iter", "n_estimators"):
-            if hasattr(el, attr) and getattr(el, attr) is not None:
-                setattr(el, attr, max(50, int(getattr(el, attr) * 0.7)))
-        if hasattr(el, "n_jobs"):
-            el.n_jobs = -1
-        return el
 
     def predict_clinical(self, X, alpha: float = 0.05) -> dict:
         self._check_fitted()
@@ -315,7 +318,6 @@ class ADAPEL(BaseMetaLearner):
             preds = np.column_stack([m.predict(X) for m in self._bootstrap_learners])
             cate = preds.mean(axis=1)
             std = preds.std(axis=1, ddof=1)
-            from scipy.stats import norm as _norm
             zval = float(_norm.ppf(1 - alpha / 2))
             lower = cate - zval * std
             upper = cate + zval * std
@@ -351,7 +353,5 @@ class ADAPEL(BaseMetaLearner):
         names = feature_names or [f"F{i}" for i in range(X.shape[1])]
         out = []
         for line in export_text(surrogate, feature_names=names).split("\n"):
-            if not line.strip():
-                continue
-            out.append(line)
+            if line.strip(): out.append(line)
         return "\n".join(out)
