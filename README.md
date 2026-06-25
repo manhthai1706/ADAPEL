@@ -1,6 +1,12 @@
 # ADAPEL: Adaptive Doubly-Robust Pseudo-outcome Ensemble Learner
 
+[![CI](https://github.com/manhthai1706/ADAPEL/actions/workflows/ci.yml/badge.svg)](https://github.com/manhthai1706/ADAPEL/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)]()
+
 A meta-learning model for **Conditional Average Treatment Effect (CATE)** estimation from observational data. ADAPEL adaptively fuses three complementary meta-learners (DR-Learner, X-Learner, R-Learner) into a single propensity-driven ensemble, with a focus on doubly-robust inference and clinical-grade uncertainty quantification.
+
+Optimised for **weak machines**: parallel OOF stacking, mode presets (fast/balanced/accurate), threading backend.
 
 ## Key Innovation
 
@@ -23,11 +29,11 @@ alpha(x) = max(min_alpha, clip(1 - 4*e(x)*(1-e(x)), 0, 1)^gamma)
 - When `e(x) ≈ 0` or `1` (imbalanced region): alpha → 1, ADAPEL falls back to the **X-Learner** (more stable in tails).
 - **R-Learner sample weighting** `(T - e(x))^2` further upweights informative samples whose treatment status deviates from the propensity.
 
-The fused pseudo-outcome is then regressed on `X` using **NNLS-constrained positive stacking** over a diverse set of base learners (HistGBM, ExtraTrees, Ridge, DecisionTree), with L2 regularization for stability.
+The fused pseudo-outcome is then regressed on `X` using **NNLS-constrained positive stacking** over a diverse set of base learners (HistGBM, ExtraTrees, Ridge, DecisionTree, Lasso), with L2 regularization for stability. OOF stacking runs in **parallel** via joblib threading.
 
 ## Algorithm (4 Steps)
 
-1. **Cross-fit k-fold** with StratifiedKFold to estimate nuisance functions `mu0(x), mu1(x), e(x)` while preserving treatment proportions.
+1. Fit nuisance functions `mu0(x), mu1(x), e(x)` on full data (no cross-fitting, faster on small data).
 2. **Adaptive pseudo-outcome** `Y_fused = alpha * Y_X + (1 - alpha) * Y_DR` driven by `e(x)`.
 3. **R-Learner sample weights** `w_i = (T_i - e(X_i))^2` to upweight informative samples.
 4. **NNLS positive stacking** with L2 regularization on out-of-fold base learner predictions for the final CATE estimator.
@@ -35,8 +41,29 @@ The fused pseudo-outcome is then regressed on `X` using **NNLS-constrained posit
 ## Installation
 
 ```bash
+pip install git+https://github.com/manhthai1706/ADAPEL.git
+```
+
+Or for development:
+
+```bash
+git clone https://github.com/manhthai1706/ADAPEL.git
+cd ADAPEL
 pip install -r requirements.txt
-python download_datasets.py    # downloads all benchmark datasets
+pip install -e .
+```
+
+## Mode Presets
+
+| Mode | Outcome iter | Tree depth | ExtraTrees | OOF frac | Boot frac | Use case |
+|------|-------------|------------|------------|----------|-----------|----------|
+| `fast` | 80 | 4 | 100 | 0.35 | 0.50 | Weak machines, quick exploration |
+| `balanced` | 150 | 6 | 200 | 0.50 | 0.70 | Default, general purpose |
+| `accurate` | 300 | 8 | 500 | 0.70 | 0.85 | Maximum accuracy, strong machines |
+
+```python
+# Fast mode — lighter models, less RAM
+model = ADAPEL(mode="fast", verbose=True).fit(X, T, Y)
 ```
 
 ## Quick Start
@@ -46,7 +73,7 @@ from adapel import ADAPEL
 import numpy as np
 
 # X: covariates, T: binary treatment, Y: observed outcome
-model = ADAPEL(n_folds=3, fusion_gamma=1.0, min_alpha=0.1)
+model = ADAPEL(n_folds=3, mode="fast")
 model.fit(X, T, Y)
 
 # CATE estimates per individual
@@ -113,22 +140,17 @@ rules = model.explain_cate_surrogate(X, feature_names=cols, max_depth=3)
 
 ADAPEL estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%], E-Value: 1.33), consistent with Connors et al. (1996) that RHC increases short-term mortality.
 
-## Datasets
+### Synthetic data (built-in, no download needed)
 
-| Dataset | Source | Samples | Features | Type |
-|---------|--------|---------|----------|------|
-| IHDP | Hill (2011) | 747 | 25 | Semi-synthetic |
-| IHDP-100 | NPCI | 672/75 x 100 | 25 | Semi-synthetic |
-| RHC | Connors et al. (1996) | 5735 | 39 | Real observational |
-| Lalonde | NSW labor training | 445 | 8 | RCT benchmark |
-| Hillstrom | Email marketing | 64000 | 10 | RCT |
-| Twins | US birth records | ~12000 | 30 | Proxy ground truth |
-| ACIC 2016 | Causal Inference Challenge | 4802 | 58 | Semi-synthetic |
+```bash
+python train.py -m fast
+```
 
 ## API Reference
 
 | Method | Description |
 |--------|-------------|
+| `ADAPEL(mode, verbose, ...)` | Init: `mode`='fast'/'balanced'/'accurate'; `verbose` for progress logs. |
 | `fit(X, T, Y)` | Train ADAPEL on covariates, treatment, outcome. |
 | `predict(X)` | Predict CATE `tau(x)` for each individual. |
 | `predict_potential_outcomes(X)` | Return `(Y(0), Y(1))` predictions. |

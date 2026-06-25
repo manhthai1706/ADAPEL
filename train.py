@@ -3,11 +3,14 @@ train.py — ADAPEL practical test
 
 Chạy được ngay (tự sinh synthetic data + load data từ paper/ nếu có).
 Output: PEHE, ATE, stacking weights, runtime, CI coverage.
+Dùng mode='fast' mặc định cho máy yếu.
 """
-import sys, time, warnings
+import sys, time, warnings, argparse, os
 warnings.filterwarnings("ignore")
-try: sys.stdout.reconfigure(encoding="utf-8")
-except: pass
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 import numpy as np
 import pandas as pd
@@ -22,6 +25,12 @@ from adapel import ADAPEL
 T_LEARNER_GBM = GradientBoostingRegressor(
     n_estimators=300, max_depth=5, learning_rate=0.05, random_state=42
 )
+
+parser = argparse.ArgumentParser(description="ADAPEL benchmarks")
+parser.add_argument("-m", "--mode", choices=["fast", "balanced", "accurate"],
+                    default="fast", help="Model complexity mode (def: fast)")
+parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+ARGS = parser.parse_args()
 
 def run_t_learner(X_tr, T_tr, Y_tr, X_te, true_cate):
     m = clone(T_LEARNER_GBM).fit(np.column_stack([X_tr, T_tr]), Y_tr)
@@ -73,7 +82,7 @@ def test_synthetic():
 
     # ADAPEL
     t0 = time.time()
-    model = ADAPEL(n_folds=5).fit(X[tr], T[tr], Y[tr])
+    model = ADAPEL(n_folds=5, mode=ARGS.mode, verbose=ARGS.verbose).fit(X[tr], T[tr], Y[tr])
     cate = model.predict(X[te])
     pehe_a = np.sqrt(np.mean((cate - true_cate[te])**2))
     t_a = time.time() - t0
@@ -81,7 +90,7 @@ def test_synthetic():
 
     # ADAPEL + feature selection
     t0 = time.time()
-    model_fs = ADAPEL(n_folds=5, feature_select=True).fit(X[tr], T[tr], Y[tr])
+    model_fs = ADAPEL(n_folds=5, feature_select=True, mode=ARGS.mode, verbose=ARGS.verbose).fit(X[tr], T[tr], Y[tr])
     pehe_fs = np.sqrt(np.mean((model_fs.predict(X[te]) - true_cate[te])**2))
     t_fs = time.time() - t0
 
@@ -107,7 +116,7 @@ def test_synthetic():
 # ── 2. IHDP (real covariates, semi-synthetic) ──
 
 def test_ihdp(path="data/ihdp/ihdp.csv", alt="paper/ihdp/ihdp.csv"):
-    f = path if __import__("os").path.exists(path) else alt
+    f = path if os.path.exists(path) else alt
     print("\n" + "=" * 65)
     print(f"  2. IHDP — semi-synthetic (747 samples, 25 features)")
     print("=" * 65)
@@ -123,7 +132,7 @@ def test_ihdp(path="data/ihdp/ihdp.csv", alt="paper/ihdp/ihdp.csv"):
     pehe_t = run_t_learner(X, T, Y, X, true_cate)
 
     t0 = time.time()
-    model = ADAPEL(n_folds=5, fusion_gamma=2.0, min_alpha=0.0).fit(X, T, Y)
+    model = ADAPEL(n_folds=5, fusion_gamma=2.0, min_alpha=0.0, mode=ARGS.mode, verbose=ARGS.verbose).fit(X, T, Y)
     cate = model.predict(X)
     pehe_a = np.sqrt(np.mean((cate - true_cate)**2))
     t_a = time.time() - t0
@@ -141,7 +150,7 @@ def test_ihdp(path="data/ihdp/ihdp.csv", alt="paper/ihdp/ihdp.csv"):
 # ── 3. RHC (real observational) ──
 
 def test_rhc(path="data/rhc/rhc.csv", alt="paper/rhc/rhc.csv"):
-    f = path if __import__("os").path.exists(path) else alt
+    f = path if os.path.exists(path) else alt
     print("\n" + "=" * 65)
     print("  3. RHC — real observational (5735 patients, 39 features)")
     print("=" * 65)
@@ -167,7 +176,7 @@ def test_rhc(path="data/rhc/rhc.csv", alt="paper/rhc/rhc.csv"):
     print(f"  Naive RD: {Y[T==1].mean()-Y[T==0].mean():.4f} (confounded)")
 
     t0 = time.time()
-    model = ADAPEL(n_folds=3).fit(X, T, Y)
+    model = ADAPEL(n_folds=3, mode=ARGS.mode, verbose=ARGS.verbose).fit(X, T, Y)
     ate = model.estimate_ate(X)
     t_a = time.time() - t0
     e_val = model.estimate_e_value(X, "binary")
@@ -188,7 +197,7 @@ def test_rhc(path="data/rhc/rhc.csv", alt="paper/rhc/rhc.csv"):
 # ── 4. Hillstrom (RCT benchmark) ──
 
 def test_hillstrom(path="data/hillstrom/hillstrom.csv", alt="paper/hillstrom/hillstrom.csv"):
-    f = path if __import__("os").path.exists(path) else alt
+    f = path if os.path.exists(path) else alt
     print("\n" + "=" * 65)
     print("  4. HILLSTROM — RCT benchmark (64000 customers)")
     print("=" * 65)
@@ -204,7 +213,7 @@ def test_hillstrom(path="data/hillstrom/hillstrom.csv", alt="paper/hillstrom/hil
     ate_rct = Y[T==1].mean() - Y[T==0].mean()
 
     t0 = time.time()
-    model = ADAPEL(n_folds=3).fit(X, T, Y)
+    model = ADAPEL(n_folds=3, mode=ARGS.mode, verbose=ARGS.verbose).fit(X, T, Y)
     ate = model.estimate_ate(X)
     t_a = time.time() - t0
     d = model.get_diagnostics(X)
@@ -220,6 +229,7 @@ if __name__ == "__main__":
     np.set_printoptions(precision=3, suppress=True)
     t_start = time.time()
 
+    print(f"ADAPEL mode: {ARGS.mode}")
     test_synthetic()
     test_ihdp()
     test_rhc()
