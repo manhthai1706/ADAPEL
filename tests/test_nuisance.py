@@ -1,6 +1,9 @@
 import numpy as np
 import pytest
-from adapel.nuisance import alpha, clip_e, validate, check_min_class, _assert_finite
+from adapel.nuisance import (
+    alpha, clip_e, validate, check_min_class, _assert_finite,
+    detect_missing, check_sample_size,
+)
 
 
 class TestValidate:
@@ -21,7 +24,7 @@ class TestValidate:
     def test_nan_values(self):
         X = np.ones((10, 3))
         X[0, 0] = np.nan
-        with pytest.raises(ValueError, match="NaN or infinite"):
+        with pytest.raises(ValueError, match="NaN"):
             validate(X, np.ones(10), np.ones(10))
 
     def test_inf_values(self):
@@ -85,3 +88,46 @@ class TestAssertFinite:
     def test_inf(self):
         with pytest.raises(ValueError, match="NaN or infinite"):
             _assert_finite(np.array([1.0, np.inf]), "X")
+
+
+class TestValidateAllowMissing:
+    def test_nan_rejected_by_default(self):
+        X = np.ones((10, 3))
+        X[0, 0] = np.nan
+        with pytest.raises(ValueError, match="NaN"):
+            validate(X, np.ones(10), np.ones(10))
+
+    def test_missing_data_detection(self):
+        X = np.ones((10, 3))
+        X[0, 0] = np.nan
+        result = detect_missing(X)
+        assert result["has_missing"]
+        assert result["n_missing"] == 1
+        assert result["col_n_missing"][0] == 1
+
+    def test_no_missing(self):
+        X = np.ones((10, 3))
+        result = detect_missing(X)
+        assert not result["has_missing"]
+        assert result["n_missing"] == 0
+
+
+class TestCheckSampleSize:
+    def test_adequate(self):
+        X = np.random.randn(500, 5)
+        T = np.array([0] * 250 + [1] * 250)
+        warnings = check_sample_size(X, T)
+        assert len(warnings) == 0
+
+    def test_small_warning(self):
+        X = np.random.randn(50, 3)
+        T = np.array([0] * 40 + [1] * 10)
+        warnings = check_sample_size(X, T)
+        assert any("small" in w.lower() for w in warnings)
+
+    def test_imbalance_warning(self):
+        X = np.random.randn(200, 3)
+        T = np.array([0] * 190 + [1] * 10)
+        warnings = check_sample_size(X, T)
+        imbalance_warnings = [w for w in warnings if "imbalance" in w.lower() or "arm" in w.lower()]
+        assert len(imbalance_warnings) > 0

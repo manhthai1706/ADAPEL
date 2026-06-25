@@ -1,7 +1,10 @@
 from __future__ import annotations
 import os
+import json
+import hashlib
 import warnings
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Tuple, Literal
 import numpy as np
 from numpy.typing import ArrayLike
@@ -15,22 +18,40 @@ from sklearn.ensemble import (
 from sklearn.linear_model import Ridge, Lasso
 from sklearn.model_selection import StratifiedKFold
 from sklearn.tree import DecisionTreeRegressor
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, dump, load as jl_load
 
 from .config import MODE_PRESETS
 from .base import BaseMetaLearner, scale_estimator, fit_w
-from .nuisance import validate, check_min_class, select_features, alpha, clip_e
+from .nuisance import (
+    validate,
+    check_min_class,
+    select_features,
+    alpha,
+    clip_e,
+    detect_missing,
+    check_sample_size,
+)
 from .stacking import fit_stacking, MIN_COEF_ACTIVE
 from .diagnostics import compute_diagnostics, estimate_e_value, explain_surrogate
 from .bootstrap import fit_bootstrap, predict_clinical
+from .clinical import (
+    subgroup_analysis,
+    variable_importance,
+    balance_check,
+    negative_control_test,
+    calibration_check,
+    fairness_report,
+    sample_size_report,
+)
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-# Minimum samples per treatment arm to fit per-arm outcome models
 _MIN_SAMPLES_PER_ARM = 30
+
+_ADAPEL_VERSION = "0.2.0"
 
 
 class ADAPEL(BaseMetaLearner):
@@ -125,6 +146,41 @@ class ADAPEL(BaseMetaLearner):
         self._bootstrap_learners = None
         self._t_res_std = 0.0
         self._selected_cols = None
+        self._audit = None
+        self._fit_n = 0
+        self._fit_hash = None
+
+    # ── Audit trail helpers ──
+
+    def _compute_hash(self, X: np.ndarray, T: np.ndarray, Y: np.ndarray) -> str:
+        return hashlib.sha256(
+            np.ascontiguousarray(X).tobytes()
+            + np.ascontiguousarray(T).tobytes()
+            + np.ascontiguousarray(Y).tobytes()
+        ).hexdigest()[:16]
+
+    def _build_audit(self, X: np.ndarray, T: np.ndarray, Y: np.ndarray) -> dict:
+        return {
+            "version": _ADAPEL_VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "n_samples": X.shape[0],
+            "n_features": X.shape[1],
+            "n_treated": int(T.sum()),
+            "n_control": int((1 - T).sum()),
+            "params": {
+                "mode": self._mode,
+                "n_folds": self.n_folds,
+                "fusion_gamma": self.fusion_gamma,
+                "min_alpha": self.min_alpha,
+                "clip_propensity": self.clip_propensity,
+                "feature_select": self.feature_select,
+                "feature_frac": self.feature_frac,
+            },
+            "missing": detect_missing(X),
+            "sample_size_adequate": check_sample_size(X, T),
+        }
+
+    # ── Core fitting / prediction ──
 
     def _check_fitted(self) -> None:
         if self._fitted_finals is None:
@@ -132,6 +188,13 @@ class ADAPEL(BaseMetaLearner):
 
     def _prepare_X(self, X: ArrayLike) -> np.ndarray:
         X = np.atleast_2d(np.asarray(X, dtype=float))
+        # Warn about missing data at prediction time
+        missing = detect_missing(X)
+        if missing["has_missing"] and self.verbose:
+            logger.warning(
+                f"Input X has {missing['n_missing']} NaN values "
+                f"({missing['pct_missing']:.1f}%). Results may be unreliable."
+            )
         if self._selected_cols is not None:
             X = X[:, self._selected_cols]
         return X
@@ -155,6 +218,10 @@ class ADAPEL(BaseMetaLearner):
         X, T, Y = validate(X, T, Y)
         n, nb = X.shape[0], len(self.base_estimators)
 
+        # Audit trail
+        self._fit_hash = self._compute_hash(X, T, Y)
+        self._audit = self._build_audit(X, T, Y)
+
         self._meta = self._fitted_finals = self._prop_full = None
         self._m0_full = self._m1_full = None
         self._t_res_std = 0.0
@@ -165,6 +232,8 @@ class ADAPEL(BaseMetaLearner):
 
         if self.verbose:
             logger.info(f"ADAPEL fit: n={n}, mode={self._mode}, folds={n_folds_eff}")
+            for w in self._audit["sample_size_adequate"]:
+                logger.warning(f"  Sample size: {w}")
 
         if self.feature_select:
             self._selected_cols = select_features(X, Y, self.feature_frac)
@@ -173,7 +242,6 @@ class ADAPEL(BaseMetaLearner):
         i0, i1 = T == 0, T == 1
         n0, n1 = int(i0.sum()), int(i1.sum())
 
-        # Fit outcome models per treatment arm
         if n0 >= _MIN_SAMPLES_PER_ARM:
             m0_full = clone(self.outcome_estimator).fit(X[i0], Y[i0])
         else:
@@ -241,6 +309,7 @@ class ADAPEL(BaseMetaLearner):
         self._t_res_std = float(tres.std())
         self._m0_full = m0_full
         self._m1_full = m1_full
+        self._fit_n = n
 
         if self.verbose:
             n_active = int((self._meta.coef_ > MIN_COEF_ACTIVE).sum())
@@ -288,11 +357,15 @@ class ADAPEL(BaseMetaLearner):
         y0, y1 = self.predict_potential_outcomes(X)
         return np.where(T_obs == 1, y0, y1)
 
+    # ── Diagnostics ──
+
     def get_diagnostics(self, X: ArrayLike) -> dict:
         """Return diagnostic info: propensity, alpha, stacking weights, etc."""
         self._check_fitted()
         X = self._prepare_X(X)
         return compute_diagnostics(self, X)
+
+    # ── Bootstrap ──
 
     def fit_bootstrap(
         self,
@@ -328,6 +401,8 @@ class ADAPEL(BaseMetaLearner):
         X = self._prepare_X(X)
         return predict_clinical(self, X, alpha)
 
+    # ── Sensitivity ──
+
     def estimate_e_value(
         self, X: ArrayLike, outcome_type: Literal["binary", "continuous"] = "binary"
     ) -> float:
@@ -343,6 +418,8 @@ class ADAPEL(BaseMetaLearner):
         self._check_fitted()
         X = self._prepare_X(X)
         return estimate_e_value(self, X, outcome_type)
+
+    # ── Explainability ──
 
     def explain_cate_surrogate(
         self,
@@ -360,3 +437,183 @@ class ADAPEL(BaseMetaLearner):
         self._check_fitted()
         X = self._prepare_X(X)
         return explain_surrogate(self, X, feature_names, max_depth)
+
+    # ── Clinical analysis ──
+
+    def sample_size_report(self, X: ArrayLike, T: ArrayLike) -> dict:
+        """Sample size adequacy report.
+
+        Returns dict with n, n_treated, n_control, n_features,
+        treatment_ratio, samples_per_feature, warnings, adequate.
+        """
+        return sample_size_report(self, X, T)
+
+    def subgroup_analysis(
+        self,
+        X: ArrayLike,
+        T: ArrayLike,
+        Y: ArrayLike,
+        subgroups: Optional[dict[str, np.ndarray]] = None,
+        feature_names: Optional[list[str]] = None,
+        n_bins: int = 4,
+    ) -> dict:
+        """Analyse CATE heterogeneity across subgroups.
+
+        Parameters
+        ----------
+        subgroups : dict of str -> boolean mask, optional
+            Pre-defined subgroup masks.
+        feature_names : list of str, optional
+            Names of features for reporting.
+        n_bins : int
+            Number of bins for automatic subgroup creation.
+
+        Returns
+        -------
+        dict with keys: overall_ate, subgroups (list of entries).
+        """
+        self._check_fitted()
+        X = self._prepare_X(X)
+        T = np.asarray(T, dtype=float).ravel()
+        Y = np.asarray(Y, dtype=float).ravel()
+        return subgroup_analysis(self, X, T, Y, subgroups, feature_names, n_bins)
+
+    def variable_importance(
+        self,
+        X: ArrayLike,
+        feature_names: Optional[list[str]] = None,
+        n_repeats: int = 10,
+        random_state: int = 42,
+    ) -> dict:
+        """Permutation-based variable importance for CATE predictions.
+
+        Returns
+        -------
+        dict with keys: importances_mean, importances_std, feature_names.
+        """
+        self._check_fitted()
+        X = self._prepare_X(X)
+        return variable_importance(self, X, feature_names, n_repeats, random_state)
+
+    def balance_check(
+        self,
+        X: ArrayLike,
+        T: ArrayLike,
+        feature_names: Optional[list[str]] = None,
+    ) -> dict:
+        """Covariate balance check via standardised mean difference (SMD).
+
+        Uses propensity weights for weighted SMD comparison.
+
+        Returns
+        -------
+        dict with keys: smd_unweighted, smd_weighted, threshold_exceeded.
+        """
+        X = self._prepare_X(X)
+        T = np.asarray(T, dtype=float).ravel()
+        e_raw = self._prop_full.predict_proba(X)[:, 1]
+        e = clip_e(e_raw, self.clip_propensity)
+        # IPW-style weights: treated = 1/e, control = 1/(1-e)
+        weights = np.where(T == 1, 1.0 / e, 1.0 / (1.0 - e))
+        return balance_check(X, T, feature_names, weights)
+
+    def negative_control_test(
+        self,
+        X_outcome: ArrayLike,
+        X_treatment: Optional[ArrayLike] = None,
+        n_permute: int = 100,
+        random_state: int = 42,
+    ) -> dict:
+        """Placebo test: permute treatment to check for spurious signal.
+
+        Returns
+        -------
+        dict with keys: observed_ate, permuted_ates_mean,
+        permuted_ates_std, p_value_placebo.
+        """
+        self._check_fitted()
+        X_out = self._prepare_X(X_outcome)
+        return negative_control_test(
+            self, X_out, X_treatment, n_permute, random_state
+        )
+
+    def calibration_check(
+        self,
+        X: ArrayLike,
+        n_groups: int = 10,
+    ) -> dict:
+        """Calibration check: compare predicted CATE vs observed outcome
+        difference within CATE quantile groups.
+
+        Returns
+        -------
+        dict with keys: groups, calib_error_overall.
+        """
+        self._check_fitted()
+        X = self._prepare_X(X)
+        return calibration_check(self, X, n_groups)
+
+    def fairness_report(
+        self,
+        X: ArrayLike,
+        protected_attributes: dict[str, np.ndarray],
+        feature_names: Optional[list[str]] = None,
+    ) -> dict:
+        """Fairness assessment: compare CATE across protected groups.
+
+        Parameters
+        ----------
+        protected_attributes : dict of str -> array-like
+            Each entry defines group membership (e.g., race, gender).
+
+        Returns
+        -------
+        dict with groups (list of entries with cate_mean, disparity, p_value).
+        """
+        self._check_fitted()
+        X = self._prepare_X(X)
+        return fairness_report(self, X, protected_attributes, feature_names)
+
+    # ── Audit ──
+
+    def get_audit_trail(self) -> Optional[dict]:
+        """Return audit trail from last fit.
+
+        Includes version, timestamp, sample counts, params, missing data
+        report, and sample size warnings.
+        """
+        return self._audit
+
+    # ── Serialisation ──
+
+    def save(self, path: str) -> str:
+        """Save fitted model to disk.
+
+        Parameters
+        ----------
+        path : str
+            File path (should end in .joblib or .pkl).
+
+        Returns
+        -------
+        str
+            The path the model was saved to.
+        """
+        self._check_fitted()
+        if not path.endswith((".joblib", ".pkl")):
+            path = path + ".joblib"
+        dump(self, path)
+        if self.verbose:
+            logger.info(f"Model saved to {path}")
+        return path
+
+    @staticmethod
+    def load(path: str) -> ADAPEL:
+        """Load a fitted ADAPEL model from disk.
+
+        Parameters
+        ----------
+        path : str
+            File path to load from.
+        """
+        return jl_load(path)

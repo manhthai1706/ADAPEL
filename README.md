@@ -146,7 +146,42 @@ ADAPEL estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%], E-Value: 1.33
 python train.py -m fast
 ```
 
+## Clinical-Grade Analysis
+
+```python
+# Sample size adequacy check
+report = model.sample_size_report(X, T)
+
+# Covariate balance (SMD) with propensity weighting
+balance = model.balance_check(X, T, feature_names=cols)
+
+# Subgroup analysis (auto-quartile or custom masks)
+subgroups = model.subgroup_analysis(X, T, Y, n_bins=4)
+
+# Variable importance (permutation-based)
+importance = model.variable_importance(X, feature_names=cols, n_repeats=10)
+
+# Negative control / placebo test
+placebo = model.negative_control_test(X, n_permute=100)
+
+# Calibration check (predicted vs observed CATE by quantile)
+calib = model.calibration_check(X, n_groups=10)
+
+# Fairness assessment across protected groups
+protected = {"race": race_col, "gender": gender_col}
+fairness = model.fairness_report(X, protected)
+
+# Save / load model
+model.save("adapel_model.joblib")
+loaded = ADAPEL.load("adapel_model.joblib")
+
+# Audit trail
+audit = model.get_audit_trail()
+```
+
 ## API Reference
+
+### Core
 
 | Method | Description |
 |--------|-------------|
@@ -155,14 +190,42 @@ python train.py -m fast
 | `predict(X)` | Predict CATE `tau(x)` for each individual. |
 | `predict_potential_outcomes(X)` | Return `(Y(0), Y(1))` predictions. |
 | `predict_counterfactual(X, T_observed)` | Predict the unobserved potential outcome. |
-| `estimate_ate(X)` | Average Treatment Effect. |
-| `estimate_att(X, T)` | Average Treatment effect on the Treated. |
-| `estimate_atc(X, T)` | Average Treatment effect on the Control. |
-| `fit_bootstrap(X, T, Y, n_bootstrap)` | Train ensemble of bootstrapped models for CI. |
-| `predict_clinical(X, alpha)` | Point estimate (BMA) + percentile CI + overlap. |
+| `estimate_ate(X)` / `att` / `atc` | ATE, ATT, ATC. |
+
+### Inference & Uncertainty
+
+| Method | Description |
+|--------|-------------|
+| `fit_bootstrap(X, T, Y, n_bootstrap)` | Bootstrap ensemble for confidence intervals. |
+| `predict_clinical(X, alpha)` | BMA point estimate + percentile CI + overlap flags. |
+
+### Sensitivity & Explainability
+
+| Method | Description |
+|--------|-------------|
 | `estimate_e_value(X, outcome_type)` | E-Value for unmeasured confounding. |
 | `explain_cate_surrogate(X, feature_names)` | Surrogate decision tree rules. |
-| `get_diagnostics(X)` | Propensity, alpha, stacking weights, etc. |
+| `get_diagnostics(X)` | Propensity, alpha, stacking weights, ensemble std. |
+
+### Clinical Analysis
+
+| Method | Description |
+|--------|-------------|
+| `sample_size_report(X, T)` | Sample size adequacy check with warnings. |
+| `balance_check(X, T, feature_names)` | Standardised mean difference (SMD) before/after weighting. |
+| `subgroup_analysis(X, T, Y, ...)` | CATE heterogeneity across subgroups with p-values. |
+| `variable_importance(X, ...)` | Permutation-based feature importance for CATE. |
+| `negative_control_test(X, ...)` | Placebo test (treatment permutation) for spurious signal. |
+| `calibration_check(X, ...)` | Predicted CATE vs observed outcome by quantile groups. |
+| `fairness_report(X, protected_attrs)` | Disparity analysis across protected groups. |
+
+### Model Management
+
+| Method | Description |
+|--------|-------------|
+| `save(path)` | Serialise fitted model to disk (.joblib). |
+| `load(path)` | Static: load fitted model from disk. |
+| `get_audit_trail()` | Return version, timestamp, params, missing data, sample size. |
 
 ## References
 
