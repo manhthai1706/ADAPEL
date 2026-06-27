@@ -69,7 +69,7 @@ model = ADAPEL(mode="fast", verbose=True).fit(X, T, Y)
 ## Quick Start
 
 ```python
-from adapel import ADAPEL
+from learner import ADAPEL
 import numpy as np
 
 # X: covariates, T: binary treatment, Y: observed outcome
@@ -172,8 +172,8 @@ protected = {"race": race_col, "gender": gender_col}
 fairness = model.fairness_report(X, protected)
 
 # Save / load model
-model.save("adapel_model.joblib")
-loaded = ADAPEL.load("adapel_model.joblib")
+model.save("learner_model.joblib")
+loaded = ADAPEL.load("learner_model.joblib")
 
 # Audit trail
 audit = model.get_audit_trail()
