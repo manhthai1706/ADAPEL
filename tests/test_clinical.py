@@ -1,11 +1,9 @@
 """Tests for clinical analysis module."""
 import numpy as np
 import pytest
-from adapel import ADAPEL
-from adapel.clinical import (
-    balance_check,
-    sample_size_report,
-)
+
+from model import ADAPEL
+from model.clinical import balance_check, sample_size_report
 
 
 @pytest.fixture

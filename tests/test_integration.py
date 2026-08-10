@@ -1,7 +1,8 @@
 """Integration tests for ADAPEL end-to-end pipeline."""
 import numpy as np
 import pytest
-from adapel import ADAPEL
+
+from model import ADAPEL
 
 
 @pytest.fixture

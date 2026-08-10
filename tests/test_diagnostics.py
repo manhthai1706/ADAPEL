@@ -1,8 +1,7 @@
 """Unit tests for diagnostics module."""
 import numpy as np
-import pytest
-from sklearn.ensemble import HistGradientBoostingRegressor
-from adapel import ADAPEL
+
+from model import ADAPEL
 
 
 def _fit_tiny_model():
