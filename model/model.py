@@ -31,7 +31,7 @@ from .clinical import (
     subgroup_analysis,
     variable_importance,
 )
-from .config import MODE_PRESETS
+from .config import MODE_PRESETS, ModelConfig, get_config
 from .diagnostics import compute_diagnostics, estimate_e_value, explain_surrogate
 from .nuisance import (
     alpha,
@@ -56,43 +56,45 @@ MIN_SAMPLES_PER_ARM = 30
 # ── Default estimator factories ──
 
 
-def _default_outcome_estimator(preset: dict) -> BaseEstimator:
+def _build_outcome_estimator(c: ModelConfig) -> BaseEstimator:
     return HistGradientBoostingRegressor(
-        random_state=42,
-        max_iter=preset["outcome_iter"],
-        max_depth=preset["outcome_depth"],
-        learning_rate=0.05,
+        random_state=c.random_state,
+        max_iter=c.outcome_iter,
+        max_depth=c.outcome_depth,
+        learning_rate=c.outcome_lr,
     )
 
 
-def _default_propensity_estimator(preset: dict) -> BaseEstimator:
+def _build_propensity_estimator(c: ModelConfig) -> BaseEstimator:
     return HistGradientBoostingClassifier(
-        random_state=42,
-        max_iter=preset["prop_iter"],
-        max_depth=preset["prop_depth"],
+        random_state=c.random_state,
+        max_iter=c.prop_iter,
+        max_depth=c.prop_depth,
     )
 
 
-def _default_base_estimators(preset: dict) -> list[BaseEstimator]:
+def _build_base_learners(c: ModelConfig) -> list[BaseEstimator]:
     return [
         HistGradientBoostingRegressor(
-            random_state=42,
-            max_iter=preset["gbm_iter"],
-            max_depth=preset["gbm_depth"],
-            learning_rate=0.05,
+            random_state=c.random_state,
+            max_iter=c.gbm_iter,
+            max_depth=c.gbm_depth,
+            learning_rate=c.gbm_lr,
         ),
         ExtraTreesRegressor(
-            n_estimators=preset["et_n"],
-            min_samples_leaf=preset["et_leaf"],
-            max_features=0.7,
+            n_estimators=c.et_n,
+            min_samples_leaf=c.et_leaf,
+            max_features=c.et_max_features,
             n_jobs=-1,
-            random_state=42,
+            random_state=c.random_state,
         ),
-        Ridge(alpha=1.0),
+        Ridge(alpha=c.ridge_alpha),
         DecisionTreeRegressor(
-            max_depth=preset["gbm_depth"], min_samples_leaf=10, random_state=42
+            max_depth=c.dt_max_depth,
+            min_samples_leaf=c.dt_min_samples_leaf,
+            random_state=c.random_state,
         ),
-        Lasso(alpha=0.01, max_iter=5000),
+        Lasso(alpha=c.lasso_alpha, max_iter=c.lasso_max_iter),
     ]
 
 
@@ -183,25 +185,39 @@ class ADAPEL(BaseMetaLearner):
         feature_frac: float = 0.5,
         mode: Literal["fast", "balanced", "accurate"] = "balanced",
         verbose: bool = False,
+        config: Optional[ModelConfig] = None,
     ) -> None:
-        preset = MODE_PRESETS.get(mode, MODE_PRESETS["balanced"])
-        self._oof_frac = preset["oof_frac"]
-        self._boot_frac = preset["boot_frac"]
+        # Resolve single-source-of-truth config from preset + caller overrides.
+        if config is None:
+            config = get_config(
+                mode=mode,
+                n_folds=n_folds,
+                fusion_gamma=fusion_gamma,
+                min_alpha=min_alpha,
+                clip_propensity=clip_propensity,
+                feature_select=feature_select,
+                feature_frac=feature_frac,
+            )
+        self.config: ModelConfig = config
         self._mode = mode
         self.verbose = verbose
 
-        self.outcome_estimator = outcome_estimator or _default_outcome_estimator(preset)
+        self.outcome_estimator = outcome_estimator or _build_outcome_estimator(config)
         self.propensity_estimator = (
-            propensity_estimator or _default_propensity_estimator(preset)
+            propensity_estimator or _build_propensity_estimator(config)
         )
-        self.base_estimators = base_estimators or _default_base_estimators(preset)
+        self.base_estimators = base_estimators or _build_base_learners(config)
 
-        self.n_folds = n_folds
-        self.fusion_gamma = fusion_gamma
-        self.min_alpha = min_alpha
-        self.clip_propensity = clip_propensity
-        self.feature_select = feature_select
-        self.feature_frac = feature_frac
+        # Direct-attribute mirrors for backward compatibility with code that
+        # accesses these fields directly (e.g. ``model.fusion_gamma``).
+        self.n_folds = config.n_folds
+        self.fusion_gamma = config.fusion_gamma
+        self.min_alpha = config.min_alpha
+        self.clip_propensity = config.clip_propensity
+        self.feature_select = config.feature_select
+        self.feature_frac = config.feature_frac
+        self._oof_frac = config.oof_frac
+        self._boot_frac = config.boot_frac
 
         self._meta: Optional[object] = None
         self._fitted_finals: Optional[list] = None
