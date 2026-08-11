@@ -3,7 +3,7 @@ import pytest
 from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
 
-from model.base import BaseMetaLearner, PositiveStacking, fit_w, scale_estimator
+from model.core import BaseMetaLearner, PositiveStacking, fit_w, scale_estimator
 
 
 class TestScaleEstimator:

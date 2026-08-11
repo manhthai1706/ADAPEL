@@ -1,3 +1,9 @@
+"""ADAPEL — Adaptive Doubly-Robust Pseudo-outcome Ensemble Learner.
+
+Main public class. Pipeline: nuisance models → pseudo-outcome fusion → OOF
+base learners → NNLS stacking → final ensemble. Bootstrap, diagnostics,
+and clinical analysis live in :mod:`analysis`; primitives in :mod:`core`.
+"""
 from __future__ import annotations
 
 import logging
@@ -20,29 +26,35 @@ from sklearn.linear_model import Lasso, Ridge
 from sklearn.model_selection import StratifiedKFold
 from sklearn.tree import DecisionTreeRegressor
 
-from .base import BaseMetaLearner, fit_w, scale_estimator
-from .bootstrap import fit_bootstrap, predict_clinical
-from .clinical import (
+from .analysis import (
     balance_check,
     calibration_check,
+    compute_diagnostics,
+    estimate_e_value,
+    explain_surrogate,
     fairness_report,
+    fit_bootstrap,
     negative_control_test,
+    predict_clinical,
     sample_size_report,
     subgroup_analysis,
     variable_importance,
 )
 from .config import MODE_PRESETS, ModelConfig, get_config
-from .diagnostics import compute_diagnostics, estimate_e_value, explain_surrogate
-from .nuisance import (
+from .core import (
+    MIN_COEF_ACTIVE,
+    BaseMetaLearner,
     alpha,
     check_min_class,
     check_sample_size,
     clip_e,
     detect_missing,
+    fit_stacking,
+    fit_w,
+    scale_estimator,
     select_features,
     validate,
 )
-from .stacking import MIN_COEF_ACTIVE, fit_stacking
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 warnings.filterwarnings("ignore")

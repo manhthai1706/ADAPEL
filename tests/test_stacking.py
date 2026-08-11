@@ -1,7 +1,5 @@
 import numpy as np
-
-from model.base import PositiveStacking
-from model.stacking import fit_stacking
+from model.core import PositiveStacking, fit_stacking
 
 
 class TestFitStacking:

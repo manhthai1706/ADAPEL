@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from model import ADAPEL
-from model.clinical import balance_check, sample_size_report
+from model.analysis import balance_check, sample_size_report
 
 
 @pytest.fixture

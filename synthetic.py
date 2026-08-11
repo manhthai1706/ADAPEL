@@ -208,7 +208,7 @@ def _plot_propensity(e, T, out_dir: str) -> None:
 
 def _plot_alpha_curve(X, model, out_dir: str) -> None:
     """Đường cong alpha(e) lý thuyết + giá trị thực tế."""
-    from model.nuisance import alpha
+    from model.core import alpha
 
     grid = np.linspace(0, 1, 200)
     curve = alpha(grid, model.fusion_gamma, model.min_alpha)

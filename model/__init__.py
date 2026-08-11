@@ -1,3 +1,3 @@
-from .model import ADAPEL
+from .adapel import ADAPEL
 
 __all__ = ["ADAPEL"]

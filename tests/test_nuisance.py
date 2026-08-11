@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from model.nuisance import (
+from model.core import (
     alpha,
     check_min_class,
     check_sample_size,
