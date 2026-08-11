@@ -110,6 +110,61 @@ def _save_fig(out_dir: str, name: str) -> None:
     print(f"    [plot] {name}")
 
 
+def _combine_plots(out_dir: str, names: list[str], output: str) -> None:
+    """Gộp các PNG thành 1 ảnh lưới (cols × rows), xóa các PNG gốc."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    paths = [os.path.join(out_dir, n) for n in names]
+    imgs = [Image.open(p).convert("RGB") for p in paths if os.path.exists(p)]
+    if not imgs:
+        print("    [combine] no images to merge")
+        return
+
+    cell_w, cell_h = 880, 580
+    pad, title_h = 24, 56
+    cols = 2
+
+    def _fit(im: Image.Image) -> Image.Image:
+        iw, ih = im.size
+        scale = min(cell_w / iw, cell_h / ih)
+        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        im2 = im.resize((nw, nh), Image.LANCZOS)
+        canvas = Image.new("RGB", (cell_w, cell_h), (255, 255, 255))
+        canvas.paste(im2, ((cell_w - nw) // 2, (cell_h - nh) // 2))
+        return canvas
+
+    fitted = [_fit(im) for im in imgs]
+    rows = (len(fitted) + cols - 1) // cols
+    canvas_w = cols * cell_w + (cols + 1) * pad
+    canvas_h = title_h + rows * cell_h + (rows + 1) * pad
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font_t = ImageFont.truetype("arial.ttf", 26)
+    except OSError:
+        font_t = ImageFont.load_default()
+    title = "ADAPEL — Synthetic Benchmark Report"
+    bbox = draw.textbbox((0, 0), title, font=font_t)
+    tw = bbox[2] - bbox[0]
+    draw.text(((canvas_w - tw) // 2, 14), title, fill="black", font=font_t)
+
+    for i, im in enumerate(fitted):
+        r, c = divmod(i, cols)
+        x = pad + c * (cell_w + pad)
+        y = title_h + pad + r * (cell_h + pad)
+        canvas.paste(im, (x, y))
+
+    out_path = os.path.join(out_dir, output)
+    canvas.save(out_path, "PNG", dpi=(150, 150))
+    print(f"    [combine] {output} ({canvas_w}x{canvas_h})")
+
+    for n in names:
+        p = os.path.join(out_dir, n)
+        if os.path.exists(p):
+            os.remove(p)
+
+
 def _plot_cate_calibration(pred, true, out_dir: str) -> None:
     """Predicted vs true CATE (identity line = perfect calibration)."""
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -235,36 +290,6 @@ def _plot_subgroup(subgroups, out_dir: str) -> None:
     _save_fig(out_dir, "08_subgroup_analysis.png")
 
 
-def _combine_plots(out_dir: str) -> None:
-    """Ghép 8 biểu đồ thành 1 ảnh 2x4 duy nhất."""
-    import glob
-
-    files = sorted(glob.glob(os.path.join(out_dir, "[0-9][0-9]_*.png")))
-    if not files:
-        return
-
-    images = [plt.imread(f) for f in files]
-    cols = 4
-    rows = (len(images) + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3.4 * rows))
-    axes = np.atleast_1d(axes).ravel()
-
-    for ax, img, path in zip(axes, images, files):
-        ax.imshow(img)
-        ax.set_title(os.path.splitext(os.path.basename(path))[0], fontsize=8)
-        ax.axis("off")
-
-    for ax in axes[len(images):]:
-        ax.axis("off")
-
-    fig.suptitle("ADAPEL synthetic benchmark — visual report", fontsize=12, y=1.0)
-    plt.tight_layout()
-    out_path = os.path.join(out_dir, "00_combined.png")
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"    [plot] 00_combined.png")
-
-
 def save_synthetic_figures(model, X_te, T_te, true_cate, clin, d, out_dir: str) -> None:
     """Tạo toàn bộ biểu đồ cho benchmark synthetic."""
     pred = model.predict(X_te)
@@ -281,7 +306,17 @@ def save_synthetic_figures(model, X_te, T_te, true_cate, clin, d, out_dir: str) 
                        true_cate, clin["in_overlap"], out_dir)
     _plot_feature_importance(imp, out_dir)
     _plot_subgroup(sub, out_dir)
-    _combine_plots(out_dir)
+
+    _combine_plots(out_dir, [
+        "01_cate_calibration.png",
+        "02_cate_distribution.png",
+        "03_propensity_overlap.png",
+        "04_alpha_curve.png",
+        "05_stacking_weights.png",
+        "06_bootstrap_ci.png",
+        "07_feature_importance.png",
+        "08_subgroup_analysis.png",
+    ], output="synthetic.png")
 
 
 # ── 1. Synthetic data ──
