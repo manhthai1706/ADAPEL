@@ -235,6 +235,36 @@ def _plot_subgroup(subgroups, out_dir: str) -> None:
     _save_fig(out_dir, "08_subgroup_analysis.png")
 
 
+def _combine_plots(out_dir: str) -> None:
+    """Ghép 8 biểu đồ thành 1 ảnh 2x4 duy nhất."""
+    import glob
+
+    files = sorted(glob.glob(os.path.join(out_dir, "[0-9][0-9]_*.png")))
+    if not files:
+        return
+
+    images = [plt.imread(f) for f in files]
+    cols = 4
+    rows = (len(images) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3.4 * rows))
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, img, path in zip(axes, images, files):
+        ax.imshow(img)
+        ax.set_title(os.path.splitext(os.path.basename(path))[0], fontsize=8)
+        ax.axis("off")
+
+    for ax in axes[len(images):]:
+        ax.axis("off")
+
+    fig.suptitle("ADAPEL synthetic benchmark — visual report", fontsize=12, y=1.0)
+    plt.tight_layout()
+    out_path = os.path.join(out_dir, "00_combined.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    [plot] 00_combined.png")
+
+
 def save_synthetic_figures(model, X_te, T_te, true_cate, clin, d, out_dir: str) -> None:
     """Tạo toàn bộ biểu đồ cho benchmark synthetic."""
     pred = model.predict(X_te)
@@ -251,6 +281,7 @@ def save_synthetic_figures(model, X_te, T_te, true_cate, clin, d, out_dir: str) 
                        true_cate, clin["in_overlap"], out_dir)
     _plot_feature_importance(imp, out_dir)
     _plot_subgroup(sub, out_dir)
+    _combine_plots(out_dir)
 
 
 # ── 1. Synthetic data ──
