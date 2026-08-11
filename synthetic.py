@@ -29,17 +29,7 @@ from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingRegressor
 
 from model import ADAPEL
-
-try:
-    import matplotlib
-
-    matplotlib.use("Agg")  # headless backend, không cần display
-    import matplotlib.pyplot as plt
-
-    HAS_MATPLOTLIB = True
-except ImportError:
-    plt = None
-    HAS_MATPLOTLIB = False
+from plots import HAS_MATPLOTLIB, plot_report
 
 
 T_LEARNER_GBM = GradientBoostingRegressor(
@@ -86,237 +76,11 @@ def _pehe(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
-def _r2(pred: np.ndarray, true: np.ndarray) -> float:
-    ss_res = float(np.sum((true - pred) ** 2))
-    ss_tot = float(np.sum((true - true.mean()) ** 2))
-    return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-
-
 def _print_results(rows: list[tuple[str, str, str]]) -> None:
     print(f"\n  {'Method':<25} {'PEHE':<10} {'Time':<10}")
     print(f"  {'-' * 45}")
     for name, metric, t in rows:
         print(f"  {name:<25} {metric:<10} {t:<10}")
-
-
-# ── Plotting ──
-
-
-def _save_fig(out_dir: str, name: str) -> None:
-    os.makedirs(out_dir, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, name), dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"    [plot] {name}")
-
-
-def _combine_plots(out_dir: str, names: list[str], output: str) -> None:
-    """Gộp các PNG thành 1 ảnh lưới (cols × rows), xóa các PNG gốc."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    paths = [os.path.join(out_dir, n) for n in names]
-    imgs = [Image.open(p).convert("RGB") for p in paths if os.path.exists(p)]
-    if not imgs:
-        print("    [combine] no images to merge")
-        return
-
-    cell_w, cell_h = 880, 580
-    pad, title_h = 24, 56
-    cols = 2
-
-    def _fit(im: Image.Image) -> Image.Image:
-        iw, ih = im.size
-        scale = min(cell_w / iw, cell_h / ih)
-        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
-        im2 = im.resize((nw, nh), Image.LANCZOS)
-        canvas = Image.new("RGB", (cell_w, cell_h), (255, 255, 255))
-        canvas.paste(im2, ((cell_w - nw) // 2, (cell_h - nh) // 2))
-        return canvas
-
-    fitted = [_fit(im) for im in imgs]
-    rows = (len(fitted) + cols - 1) // cols
-    canvas_w = cols * cell_w + (cols + 1) * pad
-    canvas_h = title_h + rows * cell_h + (rows + 1) * pad
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
-
-    draw = ImageDraw.Draw(canvas)
-    try:
-        font_t = ImageFont.truetype("arial.ttf", 26)
-    except OSError:
-        font_t = ImageFont.load_default()
-    title = "ADAPEL — Synthetic Benchmark Report"
-    bbox = draw.textbbox((0, 0), title, font=font_t)
-    tw = bbox[2] - bbox[0]
-    draw.text(((canvas_w - tw) // 2, 14), title, fill="black", font=font_t)
-
-    for i, im in enumerate(fitted):
-        r, c = divmod(i, cols)
-        x = pad + c * (cell_w + pad)
-        y = title_h + pad + r * (cell_h + pad)
-        canvas.paste(im, (x, y))
-
-    out_path = os.path.join(out_dir, output)
-    canvas.save(out_path, "PNG", dpi=(150, 150))
-    print(f"    [combine] {output} ({canvas_w}x{canvas_h})")
-
-    for n in names:
-        p = os.path.join(out_dir, n)
-        if os.path.exists(p):
-            os.remove(p)
-
-
-def _plot_cate_calibration(pred, true, out_dir: str) -> None:
-    """Predicted vs true CATE (identity line = perfect calibration)."""
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(true, pred, s=10, alpha=0.4, color="#1f77b4")
-    lo, hi = min(pred.min(), true.min()), max(pred.max(), true.max())
-    ax.plot([lo, hi], [lo, hi], "r--", lw=1, label="Ideal")
-    ax.set_xlabel("True CATE")
-    ax.set_ylabel("Predicted CATE")
-    ax.set_title(f"CATE calibration  (R$^2$ = {_r2(pred, true):.3f})")
-    ax.legend()
-    _save_fig(out_dir, "01_cate_calibration.png")
-
-
-def _plot_cate_distribution(pred, true, out_dir: str) -> None:
-    """Histogram so sánh phân phối CATE dự đoán vs thực tế."""
-    fig, ax = plt.subplots(figsize=(6, 4))
-    bins = np.histogram_bin_edges(np.concatenate([pred, true]), bins=40)
-    ax.hist(true, bins=bins, alpha=0.5, label="True", color="#2ca02c")
-    ax.hist(pred, bins=bins, alpha=0.5, label="Predicted", color="#1f77b4")
-    ax.set_xlabel("CATE")
-    ax.set_ylabel("Count")
-    ax.set_title("CATE distribution")
-    ax.legend()
-    _save_fig(out_dir, "02_cate_distribution.png")
-
-
-def _plot_propensity(e, T, out_dir: str) -> None:
-    """Phân phối propensity theo nhóm treatment (kiểm tra overlap)."""
-    fig, ax = plt.subplots(figsize=(6, 4))
-    bins = np.linspace(0, 1, 41)
-    ax.hist(e[T == 0], bins=bins, alpha=0.5, label="Control", color="#ff7f0e")
-    ax.hist(e[T == 1], bins=bins, alpha=0.5, label="Treated", color="#1f77b4")
-    ax.axvspan(0, 0.05, color="gray", alpha=0.3)
-    ax.axvspan(0.95, 1, color="gray", alpha=0.3)
-    ax.set_xlabel("Propensity e(x)")
-    ax.set_ylabel("Count")
-    ax.set_title("Propensity overlap by treatment arm")
-    ax.legend()
-    _save_fig(out_dir, "03_propensity_overlap.png")
-
-
-def _plot_alpha_curve(X, model, out_dir: str) -> None:
-    """Đường cong alpha(e) lý thuyết + giá trị thực tế."""
-    from model.core import alpha
-
-    grid = np.linspace(0, 1, 200)
-    curve = alpha(grid, model.fusion_gamma, model.min_alpha)
-
-    d = model.get_diagnostics(X)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(grid, curve, "k-", lw=2, label="alpha(e) curve")
-    ax.scatter(d["propensity"], d["alpha"], s=8, alpha=0.3,
-               color="#1f77b4", label="Samples")
-    ax.axhline(model.min_alpha, color="r", ls="--", lw=1, label="min_alpha")
-    ax.set_xlabel("Propensity e(x)")
-    ax.set_ylabel("Fusion weight alpha")
-    ax.set_title("X vs DR fusion weight (alpha)")
-    ax.legend()
-    _save_fig(out_dir, "04_alpha_curve.png")
-
-
-def _plot_stacking_weights(meta_weights, out_dir: str) -> None:
-    """Biểu đồ cột cho stacking weights của từng base learner."""
-    names = ["HistGBM", "ExtraTrees", "Ridge", "DecisionTree", "Lasso"]
-    fig, ax = plt.subplots(figsize=(6, 4))
-    colors = ["#2ca02c" if w > 1e-8 else "#d62728" for w in meta_weights]
-    ax.bar(names, meta_weights, color=colors)
-    ax.set_ylabel("NNLS weight")
-    ax.set_title("Stacking weights (green=active, red=pruned)")
-    ax.tick_params(axis="x", rotation=20)
-    for i, w in enumerate(meta_weights):
-        ax.text(i, w + 0.01, f"{w:.2f}", ha="center", fontsize=9)
-    _save_fig(out_dir, "05_stacking_weights.png")
-
-
-def _plot_bootstrap_ci(cate, lower, upper, true, in_overlap, out_dir: str) -> None:
-    """CATE từng mẫu kèm khoảng tin cậy bootstrap (mẫu con để dễ đọc)."""
-    n = min(len(cate), 300)
-    idx = np.argsort(cate)[:n]
-    x = np.arange(n)
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.errorbar(x, cate[idx], yerr=np.vstack([
-        cate[idx] - lower[idx], upper[idx] - cate[idx],
-    ]), fmt="o", ms=3, elinewidth=0.7, color="#1f77b4", capsize=0)
-    ax.scatter(x, true[idx], s=6, color="#2ca02c", label="True CATE", zorder=5)
-    ax.axhline(0, color="gray", lw=0.8, ls=":")
-    ax.set_xlabel("Sample (sorted by predicted CATE)")
-    ax.set_ylabel("CATE")
-    ax.set_title("Bootstrap CI (green=coverage)")
-    ax.legend()
-    _save_fig(out_dir, "06_bootstrap_ci.png")
-
-
-def _plot_feature_importance(imp, out_dir: str) -> None:
-    """Permutation importance bar chart."""
-    names = imp["feature_names"]
-    mean, std = imp["importances_mean"], imp["importances_std"]
-    order = np.argsort(mean)
-
-    fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(names))))
-    ax.barh([names[i] for i in order], mean[order],
-            xerr=std[order], color="#1f77b4", alpha=0.85)
-    ax.set_xlabel("Permutation importance (MSE)")
-    ax.set_title("CATE variable importance")
-    _save_fig(out_dir, "07_feature_importance.png")
-
-
-def _plot_subgroup(subgroups, out_dir: str) -> None:
-    """Bar chart CATE trung bình theo subgroup."""
-    top = subgroups[:10]
-    labels = [s["name"] for s in top]
-    means = [s["cate_mean"] for s in top]
-    overall = float(np.mean([s["cate_mean"] for s in subgroups]))
-
-    fig, ax = plt.subplots(figsize=(8, max(4, 0.4 * len(top))))
-    colors = ["#2ca02c" if m >= 0 else "#d62728" for m in means]
-    ax.barh(labels, means, color=colors, alpha=0.85)
-    ax.axvline(overall, color="k", ls="--", lw=1, label=f"Overall {overall:.3f}")
-    ax.set_xlabel("CATE mean")
-    ax.set_title("Subgroup analysis (top-10)")
-    ax.legend()
-    _save_fig(out_dir, "08_subgroup_analysis.png")
-
-
-def save_synthetic_figures(model, X_te, T_te, true_cate, clin, d, out_dir: str) -> None:
-    """Tạo toàn bộ biểu đồ cho benchmark synthetic."""
-    pred = model.predict(X_te)
-    e = d["propensity"]
-    imp = model.variable_importance(X_te, n_repeats=5, random_state=42)
-    sub = model.subgroup_analysis(X_te, T_te, true_cate, n_bins=4)["subgroups"]
-
-    _plot_cate_calibration(pred, true_cate, out_dir)
-    _plot_cate_distribution(pred, true_cate, out_dir)
-    _plot_propensity(e, T_te, out_dir)
-    _plot_alpha_curve(X_te, model, out_dir)
-    _plot_stacking_weights(d["meta_weights"], out_dir)
-    _plot_bootstrap_ci(clin["cate"], clin["lower_ci"], clin["upper_ci"],
-                       true_cate, clin["in_overlap"], out_dir)
-    _plot_feature_importance(imp, out_dir)
-    _plot_subgroup(sub, out_dir)
-
-    _combine_plots(out_dir, [
-        "01_cate_calibration.png",
-        "02_cate_distribution.png",
-        "03_propensity_overlap.png",
-        "04_alpha_curve.png",
-        "05_stacking_weights.png",
-        "06_bootstrap_ci.png",
-        "07_feature_importance.png",
-        "08_subgroup_analysis.png",
-    ], output="synthetic.png")
 
 
 # ── 1. Synthetic data ──
@@ -384,7 +148,9 @@ def test_synthetic(args) -> ADAPEL:
 
     if HAS_MATPLOTLIB and not args.no_plots:
         print(f"\n  Generating plots -> {args.outdir}/")
-        save_synthetic_figures(model, X[te], T[te], true_cate[te], clin, d, args.outdir)
+        plot_report(model, X[te], T[te], true_cate[te],
+                    clin=clin, d=d, out_dir=args.outdir,
+                    report_name="synthetic")
 
     return model
 
@@ -480,10 +246,8 @@ def test_rhc(args) -> None:
 
     if HAS_MATPLOTLIB and not args.no_plots:
         print(f"\n  Generating plots -> {args.outdir}/")
-        _plot_propensity(d["propensity"], T, args.outdir)
-        _plot_stacking_weights(d["meta_weights"], args.outdir)
-        _plot_bootstrap_ci(clin["cate"], clin["lower_ci"], clin["upper_ci"],
-                           np.zeros_like(clin["cate"]), clin["in_overlap"], args.outdir)
+        plot_report(model, X, T, clin=clin, d=d, out_dir=args.outdir,
+                    report_name="rhc", n_bins=4)
 
 
 # ── 4. Hillstrom ──
@@ -522,8 +286,8 @@ def test_hillstrom(args) -> None:
 
     if HAS_MATPLOTLIB and not args.no_plots:
         print(f"\n  Generating plots -> {args.outdir}/")
-        _plot_propensity(d["propensity"], T, args.outdir)
-        _plot_stacking_weights(d["meta_weights"], args.outdir)
+        plot_report(model, X, T, clin=clin, d=d, out_dir=args.outdir,
+                    report_name="hillstrom", n_bins=4)
 
 
 if __name__ == "__main__":
