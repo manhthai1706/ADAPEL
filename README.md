@@ -146,6 +146,50 @@ ADAPEL estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%], E-Value: 1.33
 python train.py -m fast
 ```
 
+### Real-data benchmarks (auto-download from GitHub, no setup)
+
+```bash
+# IHDP — semi-synthetic benchmark with known ground-truth CATE
+python ihdp.py -m fast
+
+# Hillstrom — RCT email marketing, validates ATE vs the trial estimate
+python hillstrom.py -m fast --arm mens
+python hillstrom.py -m fast --arm womens
+```
+
+| Benchmark | Samples | Features | Result |
+|-----------|---------|----------|--------|
+| IHDP (npci_1) | 747 | 25 | ADAPEL PEHE **0.691** vs T-Learner 0.716; ATE 4.037 (true 4.016); bootstrap CI coverage **96.7%** |
+| Hillstrom (mens arm) | 42,613 | 9 | ADAPEL ATE **0.7613** vs RCT 0.7698 (diff 0.0085) |
+| Hillstrom (womens arm) | 42,693 | 9 | ADAPEL ATE **0.4236** vs RCT 0.4244 (diff 0.0009) |
+
+## Visual Reports — How to Read the Figures
+
+Every run produces a single combined report image (`plots/{name}.png`) made of 8 panels. Each panel answers one question about the model.
+
+### IHDP report — semi-synthetic data (ground-truth CATE known)
+
+![ADAPEL IHDP report](plots/ihdp.png)
+
+| Panel | What it shows | How to read it |
+|-------|---------------|----------------|
+| **01 CATE calibration** | Predicted CATE vs true CATE, one dot per person | Dots hugging the red diagonal = accurate. The R² in the title measures overall calibration; closer to 1 is better. |
+| **02 CATE distribution** | Histogram of predicted (blue) vs true (green) CATE | Overlapping distributions = the model reproduces not just the average effect but its spread across people. |
+| **03 Propensity overlap** | Probability of treatment for treated (blue) vs control (orange) | Wide overlap between the two = there are comparable treated/control people at every propensity level, so effects can be estimated reliably. Gray zones at the edges (e < 0.05 or > 0.95) are regions where extrapolation is risky. |
+| **04 Fusion weight alpha** | How ADAPEL blends X-Learner and DR-Learner at each propensity | Where propensity ≈ 0.5 (good overlap) alpha ≈ 0 → trust DR-Learner. Where propensity is extreme alpha → 1 → fall back to X-Learner. This is the adaptive mechanism in action. |
+| **05 Stacking weights** | Final weight of each base learner (green = kept, red = pruned) | Only a few learners matter at the end. Red bars mean that learner was down-weighted to ~0 by the NNLS stacking. |
+| **06 Bootstrap CI** | CATE per person (dots) with 95% confidence intervals (lines), green dots = true CATE | The fraction of green dots inside the grey interval is the coverage — 96.7% here means the uncertainty is honest and well-calibrated. |
+| **07 Feature importance** | Permutation importance: how much predictions degrade when each feature is shuffled | Longer bar = more influential for treatment heterogeneity. Top features are the ones worth measuring and acting on. |
+| **08 Subgroup analysis** | Mean CATE in the most different subgroups (dashed line = overall ATE) | Green bars = subgroups that benefit, red = harmed. A quick way to spot who should (and shouldn't) be treated. |
+
+### Hillstrom reports — real observational RCT data (no ground-truth CATE)
+
+![ADAPEL Hillstrom — mens arm](plots/hillstrom_mens.png)
+
+![ADAPEL Hillstrom — womens arm](plots/hillstrom_womens.png)
+
+On real data with no ground truth, panels **01 (calibration)** and **06 (bootstrap CI)** are omitted; the rest read the same. The key check here is **03 propensity overlap** — because the data comes from a randomised trial, the treated and control distributions should overlap almost completely. Panel **08** then shows which customer segments respond (e.g. high-spending segments drive the mens effect), and the estimated ATE is compared against the RCT's own diff-in-means as a sanity check.
+
 ## Clinical-Grade Analysis
 
 ```python
