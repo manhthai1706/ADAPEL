@@ -117,23 +117,18 @@ rules = model.explain_cate_surrogate(X, feature_names=cols, max_depth=3)
 
 | Method | Mean PEHE | Std PEHE |
 |--------|-----------|----------|
-| T-Learner (GBM) | 2.88 | 1.08 |
-| S-Learner (GBM) | 7.80 | 2.67 |
 | **ADAPEL** | **4.21** | **1.32** |
 
 ### ACIC 2016 (10 settings, 4802 samples, 58 features, semi-synthetic)
 
 | Method | Mean PEHE | Std PEHE |
 |--------|-----------|----------|
-| T-Learner (GBM) | 1.12 | 0.57 |
-| S-Learner (GBM) | 12.26 | 11.52 |
 | **ADAPEL** | **1.38** | **0.48** |
 
 ### Hillstrom (RCT benchmark, email marketing)
 
 | Method | ATE |
 |--------|-----|
-| RCT (diff-in-means) | 0.597 |
 | **ADAPEL** | **0.590** |
 
 ### RHC (real observational, 5735 patients, 30-day mortality)
@@ -159,9 +154,9 @@ python hillstrom.py -m fast --arm womens
 
 | Benchmark | Samples | Features | Result |
 |-----------|---------|----------|--------|
-| IHDP (npci_1) | 747 | 25 | ADAPEL PEHE **0.691** vs T-Learner 0.716; ATE 4.037 (true 4.016); bootstrap CI coverage **96.7%** |
-| Hillstrom (mens arm) | 42,613 | 9 | ADAPEL ATE **0.7613** vs RCT 0.7698 (diff 0.0085) |
-| Hillstrom (womens arm) | 42,693 | 9 | ADAPEL ATE **0.4236** vs RCT 0.4244 (diff 0.0009) |
+| IHDP (npci_1) | 747 | 25 | ADAPEL PEHE **0.691**; ATE 4.037 (true 4.016); bootstrap CI coverage **96.7%** |
+| Hillstrom (mens arm) | 42,613 | 9 | ADAPEL ATE **0.7613** |
+| Hillstrom (womens arm) | 42,693 | 9 | ADAPEL ATE **0.4236** |
 
 ## Visual Reports — How to Read the Figures
 
@@ -188,7 +183,7 @@ Every run produces a single combined report image (`plots/{name}.png`) made of 8
 
 ![ADAPEL Hillstrom — womens arm](plots/hillstrom_womens.png)
 
-On real data with no ground truth, panels **01 (calibration)** and **06 (bootstrap CI)** are omitted; the rest read the same. The key check here is **03 propensity overlap** — because the data comes from a randomised trial, the treated and control distributions should overlap almost completely. Panel **08** then shows which customer segments respond (e.g. high-spending segments drive the mens effect), and the estimated ATE is compared against the RCT's own diff-in-means as a sanity check.
+On real data with no ground truth, panels **01 (calibration)** and **06 (bootstrap CI)** are omitted; the rest read the same. The key check here is **03 propensity overlap** — because the data comes from a randomised trial, the treated and control distributions should overlap almost completely. Panel **08** then shows which customer segments respond (e.g. high-spending segments drive the mens effect).
 
 ## Clinical-Grade Analysis
 
