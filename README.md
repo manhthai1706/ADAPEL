@@ -113,28 +113,6 @@ rules = model.explain_cate_surrogate(X, feature_names=cols, max_depth=3)
 
 ## Benchmarks
 
-### IHDP-100 (100 realizations, 672 train / 75 test, semi-synthetic)
-
-| Method | Mean PEHE | Std PEHE |
-|--------|-----------|----------|
-| **ADAPEL** | **4.21** | **1.32** |
-
-### ACIC 2016 (10 settings, 4802 samples, 58 features, semi-synthetic)
-
-| Method | Mean PEHE | Std PEHE |
-|--------|-----------|----------|
-| **ADAPEL** | **1.38** | **0.48** |
-
-### Hillstrom (RCT benchmark, email marketing)
-
-| Method | ATE |
-|--------|-----|
-| **ADAPEL** | **0.590** |
-
-### RHC (real observational, 5735 patients, 30-day mortality)
-
-ADAPEL estimates a causal ATE of **+5.07%** (95% CI: [1.4%, 8.6%], E-Value: 1.33), consistent with Connors et al. (1996) that RHC increases short-term mortality.
-
 ### Synthetic data (built-in, no download needed)
 
 ```bash
@@ -273,7 +251,6 @@ audit = model.get_audit_trail()
 - Kennedy, E. H. (2020). Towards optimal doubly robust estimation of heterogeneous treatment effects. *Electronic Journal of Statistics*, 14(1), 3008-3048.
 - VanderWeele, T. J., & Ding, P. (2017). Sensitivity analysis in observational research: introducing the E-value. *Annals of Internal Medicine*, 167(4), 268-274.
 - Hill, J. L. (2011). Bayesian nonparametric modeling for causal inference. *Journal of Computational and Graphical Statistics*, 20(1), 217-240. (IHDP benchmark)
-- Connors, A. F., et al. (1996). The effectiveness of right heart catheterization in the initial care of critically ill patients. *JAMA*, 276(11), 889-897. (RHC)
 
 ## License
 
